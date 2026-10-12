@@ -1,0 +1,77 @@
+# Milestone 1 implementation and acceptance
+
+## Product contract
+
+This is a single-user browser app for someone who lived and worked in Japan from 2018 through 2023 and wants to recover comfortable spoken Japanese before December 2, 2026. The priority is friendly CEO and employee conversation, explaining software products, and reconnecting with colleagues. Polite Japanese is the default; familiar-colleague situations include casual speech. Keigo remains available for business introductions, meetings, and email.
+
+The navigation is Today, Practice, Mistakes, Progress, and Settings. There are no kana lessons, beginner course, multiple-choice quizzes, exact-match grading, app accounts, external AI requests, or server in Milestone 1.
+
+The four checkpoint targets are self-rated, not automatically certified:
+
+| Target                                           | Evidence to compare                                                                                                                                                                                        |
+| ------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Three-minute business introduction in keigo      | Introduce yourself, the software product, and the visit’s purpose without reading a model; choose appropriate polite, honorific, and humble expressions.                                                   |
+| Ten-minute casual conversation                   | Rehearse recent work, life in Japan, hobbies, and a product conversation, with follow-up questions and clarification. A solo recording measures rehearsal; real conversational ability requires a partner. |
+| Keigo email in ten minutes                       | Write a greeting, clear purpose, necessary details, appropriate recipient treatment, and closing; compare with the model after the writing window.                                                         |
+| N2-oriented article with fewer than five lookups | Read an unfamiliar checkpoint passage, answer its two comprehension prompts, and use at most four distinct lookups. Record whether furigana support was used.                                              |
+
+The speaking baseline repeats these exact prompts:
+
+1. 初めて会う仕事関係の人に、あなたがどんな人で、どんなソフトウェアを作っているかを紹介してください。最後に、相手が答えやすい質問を一つしてください。
+2. 久しぶりに会った同僚に、最近の仕事や生活で印象に残ったことを一つ話してください。最後に、相手に聞いてみたいことも一つ加えてください。
+
+Each baseline has a two-minute target. The second prompt’s polite/casual choice is saved for later comparisons. The sixteen typed diagnostic items cover vocabulary, grammar production, kanji readings, and keigo, four per domain. The March 2026 probes are missing な in `さまざまコンピュータサイエンス`, `トーレリング` where `トレーニング` was intended, and `時計（とけい）` where `統計（とうけい）` was intended. Long-vowel pairs include とけい／とうけい, おばさん／おばあさん, and ビル／ビール. One occurrence is not a confirmed recurring pattern.
+
+## Schedule, SRS, and content
+
+The start date is anchored when study begins. Preparation runs through the day before `targetDate`, default December 2, 2026. Phase weights default to 15/35/25/25 for reactivation, core rebuild, business/keigo, and trip rehearsal. Largest-remainder rounding assigns every calendar day, with phase order breaking ties. Checkpoint dates count toward phases. For October 12 through December 1, the 51 days allocate 7/18/13/13 days and allow seven checkpoint pairs.
+
+Checkpoint A/B occur on calendar study days 7–8, 14–15, and so on, only when both fit before departure. A missed A does not suppress B or move the calendar. Session IDs, their original dates, drafts, and stage are retained across midnight. Extra sessions and manual checkpoint repeats do not replace a planned session or extend its streak. Future checkpoint practice buttons stay disabled; a generic manual reading repeat uses an already available passage. Completed ordinary sessions alternate reading and shadowing. The first three passages are available initially; later passages unlock after their checkpoint completes or its date passes, and unused reserved passages unlock after the final B. A passage opened during an earlier reading attempt is marked repeated on later attempts, including manual repeats. Longer schedules reuse the seven reserved passages and label those attempts as repeated.
+
+Checkpoint A contains the two baseline recordings, the three-minute introduction, ten-minute conversation rehearsal, replay/self-rating, a short review, and wrap-up. Its transitions can exceed thirty minutes. B contains the ten-minute email, ten-minute reading task, a short review, and wrap-up. These replace the ordinary daily loop. After departure, the trip phase continues with daily/extra practice; no new checkpoint pairs are scheduled.
+
+The scheduler uses `ts-fsrs` 5.4.2 with 90% requested retention, empty learning/relearning steps, no optimization, and fuzz disabled. Again therefore comes due on a later day rather than in a minute-scale learning loop. Each card can be graded once per session. Due cards take priority; new introductions require at least sixty seconds left in the eight-minute review block, with at most four new items per actual study date across sessions. Priority is diagnostic weakness or a confirmed issue, trip relevance, phase relevance, then stable ID order. The 190-item catalog is a library, not a promise to introduce every item before departure. Direct card practice saves separate self-grades without introducing or rescheduling a card, so it cannot bypass the daily FSRS rules.
+
+The issue tags are vocabulary recall, grammar form, kanji reading, missing な, katakana spelling, long vowels, honorific, humble, register, and naturalness. Users confirm tags themselves. A pattern needs at least two different sessions and two different observation dates in the saved timezone. Missing an existing card adds a mistake entry without a second FSRS state. A diagnostic miss creates a separate editable practice card, without an FSRS grade for the diagnostic prompt. Manually added and output-mistake cards are editable; stable IDs keep their schedules and review history. Practicing an individual card from the library is unscheduled extra practice: its self-rating is saved separately and does not change FSRS intervals or daily introduction counts.
+
+Content lives in committed JSON with stable IDs, revisions, phase/skill/issue tags, register labels, alternatives and their context, short English notes, and review provenance. Japanese readings use `[[漢字|かんじ]]`, for example `[[製品|せいひん]]を[[紹介|しょうかい]]します。`. Rendering uses ruby when enabled; speech strips the markup. Optional `speechText` replaces text that a device voice may misread. Passages have authored glossary entries and two comprehension questions. A glossary tap counts each distinct entry once; outside dictionary lookups are entered separately.
+
+Draft content is excluded from the published seed catalog. AI language review and native review are separate statuses. A native speaker’s review of business introductions, keigo, and CEO-facing email remains an acceptance task. Do not label AI review as native approval or an N2 proficiency measurement.
+
+## Storage, audio, and transfer interfaces
+
+The immutable catalog is separate from IndexedDB settings, card states, review events, sessions, manually added cards, mistakes, observations, content snapshots, recording metadata, and audio blobs. A grade and its schedule update share one progress transaction. Each session pins its content revisions and diagnostic sequence so later corrections do not change resumed models or historical comparisons. Stable content snapshots keep previously studied or removed items recoverable; backups carry the catalog version. Version-1 backups from before per-session snapshots remain importable, even when a historical model revision is unavailable; the retained review history does not invent that missing model.
+
+Storage keeps active progress/audio generation pointers. Import validates a version-1 `japanese-reactivation` envelope, stages the new generation, verifies binary audio and CRCs, then swaps pointers in a transaction. On failure or cancellation before that swap, old pointers and data stay active. JSON keeps the old audio generation; ZIP selects the new one. Missing audio references remain in the manifest and session history. An unavailable recording cannot satisfy a speaking response or reading-summary gate; another recording or a typed fallback is required. A speaking attempt can instead be explicitly self-rated Not yet and saved as unsuccessful. Unsupported versions, duplicate grades/IDs, inconsistent references, archive entries not declared by the manifest, unsafe filenames, and invalid structures are refused.
+
+ZIP contains `manifest.json` and `recordings/<id>.bin`. Audio is never base64-encoded inside JSON. Export creates ZIP output in blob parts; import uses a BlobReader and restores clips individually without materializing the entire archive as one ArrayBuffer. Individual clips are limited to 64 MiB and the manifest to 16 MiB. These bounds and the automated 120 MiB fixture do not establish peak memory safety on an iPhone; physical testing remains necessary.
+
+Capture requests mono audio at 32 kbps and chooses a supported WebM/Opus, MP4, or other supported audio format. The actual format is preserved. Emitted chunks are saved sequentially, normally every five seconds; final metadata waits for the final `dataavailable` event and pending writes. Chunk intervals and bitrate are browser-dependent. The capture timer does not count chunks. A fifteen-minute limit, interruption handling, track cleanup, and optional Screen Wake Lock bound capture. Hiding the app finalizes the attempt best effort; interrupted partial blobs may not be playable.
+
+Native Web Locks prevent a capture from overlapping a backup/restore in another tab. Startup recovery avoids another tab’s active restore or recording, marks abandoned recordings interrupted, and reconnects available audio to its original session/task. Browsers without Web Locks cannot safely identify another tab’s operation as stale; automatic recovery is conservative there. Playback failure has an explicit message and an audio-download option.
+
+Speech starts only after a tap, selects a Japanese voice with a preference for local service, and queues sentences to avoid long-utterance failures. Missing voices leave the Japanese text available. Japanese text carries `lang="ja"`; IME confirmation Enter never grades an answer, including Safari’s `keyCode=229` compatibility case. Calendar calculations use date strings in the saved timezone and remain stable across daylight-saving transitions.
+
+## Verification, review, and hosting
+
+Run `npm test`, `npm run lint`, `npm run typecheck`, and `npm run build`, then the production browser suite with `npm run test:e2e`. CI installs Chromium, Firefox, and WebKit and runs the same checks. Browser tests exercise navigation, saved drafts, IME-safe production, single grade persistence, the complete diagnostic/daily/checkpoint flows, unscheduled practice, JSON transfer, service-worker offline launch and offline backup preparation, and manifest/assets. Chromium can use fake microphone input; WebKit recording tests simulate lifecycle rather than pretending to test iPhone hardware. Playwright WebKit is not branded Safari and cannot substitute for a physical phone check.
+
+On the development Mac, bundled Firefox currently fails before a page opens with `Could not find profile folder`, including with a fresh isolated `/tmp` profile. This matches the reported [Playwright/macOS app-data issue](https://github.com/microsoft/playwright/issues/42768); its cause on this machine has not been independently proven. Firefox coverage remains enabled in Ubuntu CI. No real Firefox profile or OS privacy settings were changed to work around it.
+
+The SessionStart hook matches `startup|resume` and calls the project dependency script. The script runs `npm ci` only when `CLAUDE_CODE_REMOTE=true`, otherwise exits without installing. It propagates installation failure. Hook configuration follows [Claude’s hook reference](https://code.claude.com/docs/en/hooks).
+
+The user explicitly authorized creating and pushing one empty baseline commit on `main`, solely to enable a work-branch pull request. App files belong on `milestone-1`. Every change requires Claude’s final review before landing. Never commit app changes to a default/deploy branch, merge, publish, release, tag, or delete the work branch because repository instructions say to. Only the user’s own task prompt naming a gated step can release that step. The repository’s CI has no deployment or automatic merge job.
+
+The intended host is GitHub Pages under `/japanese-app/`; Vite base, manifest ID/start URL/scope, and service-worker scope agree on that path. A new host or subpath requires updating those values and repeating offline/asset checks. No HTTPS preview is assumed published. Local desktop localhost supports microphone capture; a phone using a LAN HTTP URL generally does not.
+
+Physical acceptance is still outstanding:
+
+- [ ] iPhone Safari and Home Screen installation, separate-storage transfer, persistence status, and offline launch.
+- [ ] Japanese IME, kana/kanji shapes, large text, furigana, and touch controls on iPhone, Android, and Windows.
+- [ ] Microphone allow/deny, short and ten-minute recordings, interruptions, screen lock, and replay on actual devices.
+- [ ] Japanese local/remote/missing voice behavior and pronunciation overrides.
+- [ ] JSON and representative 120 MiB ZIP sharing to Files, restore, cancellation, low storage, and cross-device audio compatibility.
+- [ ] An update offered during an active session waits until work is saved and capture is stopped.
+- [ ] Qualified native Japanese review of business material and registration of actual reviewer/date/status.
+
+Milestone 2 is deferred: an AI tutor would require a small server endpoint, a server-side `TUTOR_API_KEY`, and separate user authorization before introducing an account, API key, or paid service. No tutor key belongs in the static app.

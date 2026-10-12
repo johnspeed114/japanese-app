@@ -1,0 +1,7 @@
+{
+  "startDate": null,
+  "targetDate": "2026-12-02",
+  "dailyMinutes": 30,
+  "phaseWeights": [15, 35, 25, 25],
+  "timezone": "device"
+}

@@ -1,0 +1,897 @@
+import { readFile } from "node:fs/promises";
+import { expect, test } from "@playwright/test";
+import type { Page } from "@playwright/test";
+import type {
+  Catalog,
+  ProductionItem,
+  ProgressData,
+  Session,
+} from "../../src/types";
+import {
+  addDays,
+  applyGrade,
+  createSession,
+  dateInZone,
+} from "../../src/engine";
+
+async function progress(page: Page): Promise<ProgressData> {
+  return page.evaluate(
+    () =>
+      new Promise<ProgressData>((resolve, reject) => {
+        const request = indexedDB.open("japanese-reactivation");
+        request.onerror = () => reject(request.error);
+        request.onsuccess = () => {
+          const db = request.result;
+          const tx = db.transaction(["meta", "progress"]);
+          const pointers = tx.objectStore("meta").get("active");
+          pointers.onerror = () => reject(pointers.error);
+          pointers.onsuccess = () => {
+            const value = tx
+              .objectStore("progress")
+              .get(pointers.result.progress);
+            value.onerror = () => reject(value.error);
+            value.onsuccess = () => resolve(value.result as ProgressData);
+          };
+          tx.oncomplete = () => db.close();
+          tx.onabort = () => {
+            db.close();
+            reject(tx.error);
+          };
+        };
+      }),
+  );
+}
+async function start(page: Page) {
+  await page.goto("./");
+  await page.getByRole("button", { name: /^Start diagnostic/ }).click();
+  await expect(
+    page.getByRole("heading", { name: "Start with your own voice." }),
+  ).toBeVisible();
+}
+async function typedBaselines(page: Page) {
+  for (const answer of [
+    "ソフトウェアを作っています。よろしくお願いします。",
+    "最近、仕事で新しい製品を作りました。",
+  ]) {
+    await page
+      .getByRole("button", { name: "Type instead or add notes" })
+      .click();
+    await page
+      .getByRole("textbox", { name: /^Typed Japanese response/ })
+      .fill(answer);
+    await page
+      .getByRole("button", { name: "Finish this attempt", exact: true })
+      .click();
+    await page
+      .getByRole("button", { name: "Independent", exact: true })
+      .click();
+    await page.getByRole("button", { name: "Continue →", exact: true }).click();
+  }
+  await page
+    .getByRole("button", { name: "Continue to typed diagnostic" })
+    .click();
+  await expect(
+    page.getByRole("heading", { name: "Find the words you still know." }),
+  ).toBeVisible();
+}
+async function seedProgress(page: Page, data: ProgressData) {
+  await page.evaluate(
+    (data) =>
+      new Promise<void>((resolve, reject) => {
+        const opening = indexedDB.open("japanese-reactivation");
+        opening.onerror = () => reject(opening.error);
+        opening.onsuccess = () => {
+          const db = opening.result;
+          const tx = db.transaction(["meta", "progress"], "readwrite");
+          const pointers = tx.objectStore("meta").get("active");
+          pointers.onsuccess = () =>
+            tx.objectStore("progress").put(data, pointers.result.progress);
+          tx.oncomplete = () => {
+            db.close();
+            window.dispatchEvent(new Event("study-change"));
+            resolve();
+          };
+          tx.onabort = () => {
+            db.close();
+            reject(tx.error);
+          };
+        };
+      }),
+    data,
+  );
+}
+async function sessionFixture(
+  page: Page,
+  kind: "daily" | "checkpoint-a" | "checkpoint-b",
+  stage: number,
+  configure?: (data: ProgressData, catalog: Catalog, session: Session) => void,
+) {
+  await page.goto("./");
+  await expect(
+    page.getByRole("navigation", { name: "Main navigation" }),
+  ).toBeVisible();
+  const data = await progress(page);
+  const catalog = JSON.parse(
+    await readFile(
+      new URL("../../src/content/catalog.json", import.meta.url),
+      "utf8",
+    ),
+  ) as Catalog;
+  const today = dateInZone(Date.now(), data.settings.plan.timezone);
+  data.settings.plan.startDate = today;
+  data.diagnosticComplete = true;
+  const session = createSession(data, today, Date.now(), catalog, kind);
+  session.stage = stage;
+  configure?.(data, catalog, session);
+  await seedProgress(page, data);
+  await page.goto(`./#/session/${session.id}`);
+  return { session, catalog };
+}
+async function completeOutput(page: Page, model = false) {
+  await page
+    .getByRole("button", { name: "Type instead or add notes", exact: true })
+    .click();
+  await page
+    .getByRole("textbox", { name: /^Typed Japanese response/ })
+    .fill("ソフトウェアを作っています。最近の仕事について話します。");
+  await page
+    .getByRole("button", {
+      name: model ? "Compare with a model answer" : "Finish this attempt",
+      exact: true,
+    })
+    .click();
+  await page.getByRole("button", { name: "Independent", exact: true }).click();
+  await page.getByRole("button", { name: "Continue →", exact: true }).click();
+}
+async function completeReading(
+  page: Page,
+  questions: { prompt: string }[],
+  summary: boolean,
+) {
+  await page
+    .getByRole("button", { name: "Start reading", exact: true })
+    .click();
+  const lookup = page.getByRole("button", { name: /^Look up / }).first();
+  await lookup.click();
+  await lookup.click();
+  await expect(
+    page.getByText("1 distinct lookups", { exact: true }),
+  ).toBeVisible();
+  for (const question of questions)
+    await page.getByLabel(question.prompt).fill("記事の内容を説明します。");
+  if (summary)
+    await page
+      .getByRole("textbox", {
+        name: /^Typed summary if recording is unavailable/,
+      })
+      .fill("製品についての記事です。");
+  await page
+    .getByRole("button", { name: "Finish reading and compare", exact: true })
+    .click();
+  await page.getByRole("button", { name: "Independent", exact: true }).click();
+  await page.getByRole("button", { name: "Continue →", exact: true }).click();
+}
+async function completeWrap(page: Page) {
+  await expect(
+    page.getByRole("heading", { name: "A little more yours.", exact: true }),
+  ).toBeVisible();
+  await page
+    .getByRole("textbox", {
+      name: /^What felt easier, and what would you like to repeat/,
+    })
+    .fill("少し思い出しました。また練習します。");
+  await page
+    .getByRole("button", { name: "Finish session ✓", exact: true })
+    .click();
+  await expect(page).toHaveURL(/#\/today$/);
+}
+function overdueCard(data: ProgressData, catalog: Catalog, session: Session) {
+  const at = Date.now() - 2 * 86400000;
+  const prior = createSession(
+    data,
+    addDays(session.studyDate, -2),
+    at,
+    catalog,
+    "daily",
+  );
+  prior.completedAt = at;
+  applyGrade(data, catalog.cards[0], 1, prior.id, at);
+}
+async function completeShortReview(page: Page) {
+  await expect(
+    page.getByRole("heading", { name: "Bring the words back.", exact: true }),
+  ).toBeVisible();
+  await page.getByRole("button", { name: "I don’t know", exact: true }).click();
+  await page.getByRole("button", { name: "Next card →", exact: true }).click();
+  await expect(
+    page.getByRole("heading", {
+      name: "Your review block is complete.",
+      exact: true,
+    }),
+  ).toBeVisible();
+  await page.getByRole("button", { name: "Continue →", exact: true }).click();
+}
+
+test("saves the original baseline draft across reload and permits a typed fallback", async ({
+  page,
+}) => {
+  await start(page);
+  await page.getByRole("button", { name: "Type instead or add notes" }).click();
+  await page
+    .getByRole("textbox", { name: /^Typed Japanese response/ })
+    .fill("私はソフトウェアを作っています。");
+  await expect
+    .poll(async () => Object.values((await progress(page)).sessions[0].drafts))
+    .toContain("私はソフトウェアを作っています。");
+  const original = (await progress(page)).sessions[0];
+  await page.reload();
+  await expect(
+    page.getByRole("textbox", { name: /^Typed Japanese response/ }),
+  ).toHaveValue("私はソフトウェアを作っています。");
+  const resumed = (await progress(page)).sessions[0];
+  expect(resumed.id).toBe(original.id);
+  expect(resumed.studyDate).toBe(original.studyDate);
+  await expect(
+    page.getByRole("button", { name: "Finish this attempt", exact: true }),
+  ).toBeEnabled();
+});
+
+test("an idle diagnostic keeps the speaking target separate from elapsed wall time", async ({
+  page,
+}) => {
+  await page.clock.install();
+  await start(page);
+  await expect
+    .poll(
+      async () => (await progress(page)).sessions[0].startedTasks["baseline-1"],
+    )
+    .toBeGreaterThan(0);
+  await page.clock.fastForward(50 * 60_000);
+  await expect(page.getByText("Target 2:00", { exact: true })).toBeVisible();
+  await expect(
+    page
+      .locator(".recorder-controls")
+      .getByText("0:00 / target 2:00", { exact: true }),
+  ).toBeVisible();
+  await expect(page.locator(".card-top").getByText(/50:00/)).toHaveCount(0);
+  await expect(
+    page.getByRole("button", { name: "Finish this attempt", exact: true }),
+  ).toBeDisabled();
+  expect((await progress(page)).sessions[0].recordingIds).toEqual({});
+});
+
+test("IME confirmation never submits and two rapid grade clicks save once", async ({
+  page,
+}) => {
+  await start(page);
+  await typedBaselines(page);
+  const answer = page.getByRole("textbox", { name: /^Your Japanese answer/ });
+  await answer.dispatchEvent("compositionstart", { data: "とうけい" });
+  await answer.fill("統計");
+  await answer.dispatchEvent("compositionend", { data: "統計" });
+  await answer.dispatchEvent("keydown", {
+    key: "Enter",
+    code: "Enter",
+    keyCode: 229,
+    isComposing: false,
+  });
+  await expect(
+    page.getByRole("button", { name: "Reveal model answer", exact: true }),
+  ).toBeVisible();
+  expect(Object.keys((await progress(page)).diagnosticGrades)).toHaveLength(0);
+  await page
+    .getByRole("button", { name: "I don’t know", exact: true })
+    .evaluate((button) => {
+      (button as HTMLButtonElement).click();
+      (button as HTMLButtonElement).click();
+    });
+  await expect(
+    page.getByText("✓ Diagnostic answer saved", { exact: true }),
+  ).toBeVisible();
+  const diagnostic = await progress(page);
+  expect(Object.keys(diagnostic.diagnosticGrades)).toHaveLength(1);
+  const diagnosticId = Object.keys(diagnostic.diagnosticGrades)[0];
+  expect(diagnostic.userCards).toHaveLength(1);
+  const mistake = diagnostic.userCards[0];
+  expect(mistake.id).not.toBe(diagnosticId);
+  expect(mistake.kind).toBe("card");
+  expect(diagnostic.mistakes[mistake.id]).toBeDefined();
+  expect(diagnostic.cardStates[diagnosticId]).toBeUndefined();
+  expect(diagnostic.reviewEvents).toHaveLength(0);
+  const saved = (await progress(page)).sessions[0].completedTasks.filter(
+    (task) => task !== "baseline-1" && task !== "baseline-2",
+  );
+  expect(saved).toHaveLength(1);
+  await page.getByRole("button", { name: "Next prompt →" }).click();
+  await expect(answer).toHaveValue("");
+  await expect(page.locator('[lang="ja"]').first()).toBeVisible();
+  await page.getByRole("link", { name: "Mistakes", exact: true }).click();
+  await page.getByRole("button", { name: "Edit", exact: true }).click();
+  await expect(
+    page.getByRole("textbox", {
+      name: "English production prompt",
+      exact: true,
+    }),
+  ).toHaveValue(mistake.prompt);
+});
+
+test("a revealed production answer remains visible after reload before grading", async ({
+  page,
+}) => {
+  await sessionFixture(page, "daily", 0);
+  await page
+    .getByRole("textbox", { name: /^Your Japanese answer/ })
+    .fill("練習の回答です。");
+  await page
+    .getByRole("button", { name: "Reveal model answer", exact: true })
+    .click();
+  await expect(
+    page.getByText("Model answer · compare, then self-grade", { exact: true }),
+  ).toBeVisible();
+  await page.reload();
+  await expect(
+    page.getByText("Model answer · compare, then self-grade", { exact: true }),
+  ).toBeVisible();
+  await expect(page.getByRole("button", { name: /^Good/ })).toBeEnabled();
+  expect((await progress(page)).reviewEvents).toHaveLength(0);
+});
+
+test("ordinary reading requires comprehension answers and a spoken or typed summary", async ({
+  page,
+}) => {
+  const { session, catalog } = await sessionFixture(page, "daily", 2);
+  const passage = catalog.passages.find(
+    (passage) => passage.id === session.passageId,
+  )!;
+  await page
+    .getByRole("button", { name: "Start reading", exact: true })
+    .click();
+  await expect(
+    page.getByRole("button", {
+      name: "Finish reading and compare",
+      exact: true,
+    }),
+  ).toBeDisabled();
+  for (const question of passage.questions)
+    await page.getByLabel(question.prompt).fill("記事の内容を説明します。");
+  await expect(
+    page.getByRole("button", {
+      name: "Finish reading and compare",
+      exact: true,
+    }),
+  ).toBeDisabled();
+  await page
+    .getByRole("textbox", {
+      name: /^Typed summary if recording is unavailable/,
+    })
+    .fill("この記事は製品について説明しています。");
+  await expect(
+    page.getByRole("button", {
+      name: "Finish reading and compare",
+      exact: true,
+    }),
+  ).toBeEnabled();
+});
+
+test("missing a checkpoint email reactivates its existing archived mistake card", async ({
+  page,
+}) => {
+  await sessionFixture(page, "checkpoint-b", 0, (data, catalog) => {
+    const email = catalog.scenarios.find(
+      (scenario) => scenario.mode === "email",
+    )!.turns[0];
+    const card: ProductionItem = {
+      id: "output-checkpoint-email",
+      revision: 1,
+      kind: "card",
+      prompt: email.prompt,
+      answer: email.answer,
+      alternatives: email.alternatives,
+      notes: email.notes,
+      register: "keigo",
+      phaseTags: ["business"],
+      skillTags: ["keigo"],
+      tripRelevant: true,
+      issueTags: ["register"],
+      review: {
+        status: "draft",
+        reviewer: "Your own mistake",
+        date: "2026-10-12",
+      },
+    };
+    data.userCards.push(card);
+    data.snapshots[card.id] = card;
+    data.mistakes[card.id] = {
+      cardId: card.id,
+      addedAt: 1000,
+      source: "output",
+      archived: true,
+    };
+  });
+  await page
+    .getByRole("button", { name: "Start ten-minute email", exact: true })
+    .click();
+  await page
+    .getByRole("textbox", { name: /^Your email in Japanese/ })
+    .fill("本日はありがとうございました。よろしくお願いします。");
+  await page
+    .getByRole("button", { name: "Finish writing and compare", exact: true })
+    .click();
+  await page.getByRole("button", { name: "Not yet", exact: true }).click();
+  await page.getByRole("button", { name: "Continue →", exact: true }).click();
+  await expect
+    .poll(
+      async () =>
+        (await progress(page)).mistakes["output-checkpoint-email"].archived,
+    )
+    .toBe(false);
+  expect(
+    (await progress(page)).userCards.filter(
+      (card) => card.id === "output-checkpoint-email",
+    ),
+  ).toHaveLength(1);
+});
+
+test("progress JSON preview and restore replace drafts after explicit confirmation", async ({
+  page,
+  context,
+}) => {
+  await context.addInitScript(() => {
+    Object.defineProperty(navigator, "canShare", {
+      configurable: true,
+      value: () => false,
+    });
+  });
+  await start(page);
+  await page.getByRole("button", { name: "Type instead or add notes" }).click();
+  await page
+    .getByRole("textbox", { name: /^Typed Japanese response/ })
+    .fill("保存した回答です。");
+  await expect
+    .poll(async () => (await progress(page)).sessions[0].drafts["baseline-1"])
+    .toBe("保存した回答です。");
+  await page.getByRole("link", { name: "Settings", exact: true }).click();
+  await page
+    .getByRole("button", { name: "Prepare progress JSON", exact: true })
+    .click();
+  const downloading = page.waitForEvent("download");
+  await page
+    .getByRole("button", { name: "Save / share backup", exact: true })
+    .click();
+  const download = await downloading;
+  const path = await download.path();
+  expect(path).not.toBeNull();
+  const envelope = JSON.parse(await readFile(path!, "utf8"));
+  expect(envelope.kind).toBe("progress");
+  expect(envelope.progress.catalogVersion).toBeTruthy();
+  expect(
+    envelope.recordings.every((row: { included: boolean }) => !row.included),
+  ).toBe(true);
+  envelope.progress.sessions[0].drafts["baseline-1"] =
+    "バックアップから戻した回答です。";
+  envelope.progress.settings.plan.dailyMinutes = 45;
+  await page
+    .getByLabel("Choose a JSON or ZIP backup", { exact: true })
+    .setInputFiles({
+      name: "restored.json",
+      mimeType: "application/json",
+      buffer: Buffer.from(JSON.stringify(envelope)),
+    });
+  await expect(
+    page.getByRole("heading", { name: "Restore preview", exact: true }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("button", { name: "Restore this backup", exact: true }),
+  ).toBeDisabled();
+  expect((await progress(page)).sessions[0].drafts["baseline-1"]).toBe(
+    "保存した回答です。",
+  );
+  await page
+    .getByRole("checkbox", {
+      name: "I understand what will be replaced and have saved any backup I need.",
+    })
+    .check();
+  await page
+    .getByRole("button", { name: "Restore this backup", exact: true })
+    .click();
+  await expect
+    .poll(async () => (await progress(page)).sessions[0].drafts["baseline-1"])
+    .toBe("バックアップから戻した回答です。");
+  await expect(
+    page.getByRole("spinbutton", { name: "Daily minutes", exact: true }),
+  ).toHaveValue("45");
+});
+
+test("missing audio in a progress restore cannot complete speaking or a reading summary", async ({
+  page,
+}) => {
+  await start(page);
+  const restored = await progress(page);
+  const baseline = restored.sessions[0];
+  baseline.recordingIds["baseline-1"] = "missing-baseline-audio";
+  await page.getByRole("link", { name: "Settings", exact: true }).click();
+  await page
+    .getByLabel("Choose a JSON or ZIP backup", { exact: true })
+    .setInputFiles({
+      name: "progress-without-audio.json",
+      mimeType: "application/json",
+      buffer: Buffer.from(
+        JSON.stringify({
+          format: "japanese-reactivation",
+          version: 1,
+          kind: "progress",
+          exportedAt: new Date().toISOString(),
+          progress: restored,
+          recordings: [{ id: "missing-baseline-audio", included: false }],
+        }),
+      ),
+    });
+  await expect(
+    page.getByRole("heading", { name: "Restore preview", exact: true }),
+  ).toBeVisible();
+  await page
+    .getByRole("checkbox", {
+      name: "I understand what will be replaced and have saved any backup I need.",
+    })
+    .check();
+  await page
+    .getByRole("button", { name: "Restore this backup", exact: true })
+    .click();
+  await expect
+    .poll(
+      async () => (await progress(page)).sessions[0].recordingIds["baseline-1"],
+    )
+    .toBe("missing-baseline-audio");
+  await page.goto(`./#/session/${baseline.id}`);
+  await expect(
+    page.getByText(/This recording has no available audio/),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("button", { name: "Finish this attempt", exact: true }),
+  ).toBeDisabled();
+  await page
+    .getByRole("button", { name: "Type instead or add notes", exact: true })
+    .click();
+  await page
+    .getByRole("textbox", { name: /^Typed Japanese response/ })
+    .fill("録音の代わりに入力します。");
+  await expect(
+    page.getByRole("button", { name: "Finish this attempt", exact: true }),
+  ).toBeEnabled();
+
+  const { session, catalog } = await sessionFixture(
+    page,
+    "daily",
+    2,
+    (_data, _catalog, session) => {
+      session.recordingIds["reading-summary"] = "missing-reading-audio";
+    },
+  );
+  await page
+    .getByRole("button", { name: "Start reading", exact: true })
+    .click();
+  const passage = catalog.passages.find(
+    (value) => value.id === session.passageId,
+  )!;
+  for (const question of passage.questions)
+    await page.getByLabel(question.prompt).fill("記事の内容を説明します。");
+  await expect(
+    page.getByText(/This recording has no available audio/),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("button", {
+      name: "Finish reading and compare",
+      exact: true,
+    }),
+  ).toBeDisabled();
+  await page
+    .getByRole("textbox", {
+      name: /^Typed summary if recording is unavailable/,
+    })
+    .fill("録音の代わりに記事を要約します。");
+  await expect(
+    page.getByRole("button", {
+      name: "Finish reading and compare",
+      exact: true,
+    }),
+  ).toBeEnabled();
+  expect(
+    (await progress(page)).sessions.find((value) => value.id === session.id)!
+      .recordingIds["reading-summary"],
+  ).toBe("missing-reading-audio");
+});
+
+test("manual checkpoint B preserves reserved readings and the planned session for today", async ({
+  page,
+}) => {
+  await page.goto("./");
+  await expect(
+    page.getByRole("navigation", { name: "Main navigation" }),
+  ).toBeVisible();
+  const data = await progress(page);
+  const today = dateInZone(Date.now(), data.settings.plan.timezone);
+  data.diagnosticComplete = true;
+  data.settings.plan.startDate = today;
+  data.settings.plan.targetDate = addDays(today, 50);
+  await seedProgress(page, data);
+  await page.getByRole("link", { name: "Progress", exact: true }).click();
+  const futureReadings = page.getByRole("button", {
+    name: "Practice B",
+    exact: true,
+  });
+  await expect(futureReadings).toHaveCount(7);
+  for (const button of await futureReadings.all())
+    await expect(button).toBeDisabled();
+  await page
+    .getByRole("button", {
+      name: "Repeat email & reading checkpoint",
+      exact: true,
+    })
+    .click();
+  await expect(
+    page.getByRole("button", { name: "Start ten-minute email", exact: true }),
+  ).toBeVisible();
+  const manual = (await progress(page)).sessions.at(-1)!;
+  const catalog = JSON.parse(
+    await readFile(
+      new URL("../../src/content/catalog.json", import.meta.url),
+      "utf8",
+    ),
+  ) as Catalog;
+  expect(manual.kind).toBe("checkpoint-b");
+  expect(manual.manualCheckpoint).toBe(true);
+  expect(catalog.passages.slice(0, 3).map((passage) => passage.id)).toContain(
+    manual.passageId,
+  );
+  await page.getByRole("link", { name: "Today", exact: true }).click();
+  await page.getByRole("button", { name: /^Start today’s session/ }).click();
+  await expect(
+    page.getByRole("heading", { name: "Bring the words back.", exact: true }),
+  ).toBeVisible();
+  const planned = (await progress(page)).sessions.at(-1)!;
+  expect(planned.id).not.toBe(manual.id);
+  expect(planned.kind).toBe("daily");
+  expect(planned.manualCheckpoint).not.toBe(true);
+});
+
+test("production app and saved session reopen offline after installation caches finish", async ({
+  page,
+  context,
+}) => {
+  await start(page);
+  await page.getByRole("button", { name: "Type instead or add notes" }).click();
+  await page
+    .getByRole("textbox", { name: /^Typed Japanese response/ })
+    .fill("オフラインでも練習します。");
+  await expect
+    .poll(async () => (await progress(page)).sessions[0].drafts["baseline-1"])
+    .toBe("オフラインでも練習します。");
+  await page.evaluate(async () => {
+    await navigator.serviceWorker.ready;
+  });
+  await page.reload();
+  await expect
+    .poll(() =>
+      page.evaluate(() => Boolean(navigator.serviceWorker.controller)),
+    )
+    .toBe(true);
+  await context.setOffline(true);
+  await page.reload();
+  await expect(
+    page.getByRole("textbox", { name: /^Typed Japanese response/ }),
+  ).toHaveValue("オフラインでも練習します。");
+  await expect(
+    page.getByRole("button", { name: "Finish this attempt", exact: true }),
+  ).toBeEnabled();
+  await page.getByRole("link", { name: "Settings", exact: true }).click();
+  await page
+    .getByRole("button", { name: "Prepare progress JSON", exact: true })
+    .click();
+  await expect(page.getByText(/japanese-progress-.*\.json/)).toBeVisible();
+  await page
+    .getByRole("button", { name: "Prepare full ZIP", exact: true })
+    .click();
+  await expect(page.getByText(/japanese-full-.*\.zip/)).toBeVisible();
+});
+
+test("manifest and icons use the intended Pages path", async ({
+  page,
+  request,
+}) => {
+  await page.goto("./");
+  const manifestURL = await page
+    .locator('link[rel="manifest"]')
+    .evaluate((link) => (link as HTMLLinkElement).href);
+  const response = await request.get(manifestURL);
+  expect(response.ok()).toBe(true);
+  const manifest = await response.json();
+  expect(manifest.start_url).toBe("/japanese-app/");
+  expect(manifest.scope).toBe("/japanese-app/");
+  expect(manifest.display).toBe("standalone");
+  expect(manifest.icons.length).toBeGreaterThan(0);
+  for (const icon of manifest.icons) {
+    const asset = await request.get(new URL(icon.src, manifestURL).href);
+    expect(asset.ok()).toBe(true);
+    expect(asset.headers()["content-type"]).toMatch(/^image\//);
+  }
+});
+
+test("completes all sixteen diagnostic prompts and saves the baseline wrap-up", async ({
+  page,
+}) => {
+  await start(page);
+  await typedBaselines(page);
+  for (let index = 0; index < 16; index++) {
+    await page
+      .getByRole("button", { name: "I don’t know", exact: true })
+      .click();
+    await page
+      .getByRole("button", { name: "Next prompt →", exact: true })
+      .click();
+  }
+  await page
+    .getByRole("button", { name: "See your baseline wrap-up", exact: true })
+    .click();
+  await completeWrap(page);
+  const saved = await progress(page);
+  expect(saved.diagnosticComplete).toBe(true);
+  expect(Object.keys(saved.diagnosticGrades)).toHaveLength(16);
+  expect(saved.userCards).toHaveLength(16);
+  expect(saved.reviewEvents).toHaveLength(0);
+  expect(
+    saved.sessions.find((session) => session.kind === "diagnostic")
+      ?.completedAt,
+  ).not.toBeNull();
+});
+
+test("completes the daily production, every scenario turn, reading summary, and wrap-up", async ({
+  page,
+}) => {
+  const { session, catalog } = await sessionFixture(page, "daily", 0);
+  await page.getByRole("button", { name: "I don’t know", exact: true }).click();
+  await page
+    .getByRole("button", { name: "Finish review for today", exact: true })
+    .click();
+  const scenario = catalog.scenarios.find(
+    (scenario) => scenario.id === session.scenarioId,
+  )!;
+  expect(scenario.mode).toBe("speaking");
+  for (const turn of scenario.turns) {
+    await expect(
+      page.getByRole("heading", { name: turn.prompt, exact: true }),
+    ).toBeVisible();
+    await completeOutput(page, true);
+  }
+  await page
+    .getByRole("button", { name: "Continue to reading →", exact: true })
+    .click();
+  const passage = catalog.passages.find(
+    (passage) => passage.id === session.passageId,
+  )!;
+  await completeReading(page, passage.questions, true);
+  await completeWrap(page);
+  const saved = await progress(page);
+  const completed = saved.sessions.find((value) => value.id === session.id)!;
+  expect(completed.completedAt).not.toBeNull();
+  expect(
+    completed.completedTasks.filter((task) => task.startsWith("turn:")),
+  ).toHaveLength(scenario.turns.length);
+  expect(completed.completedTasks).toContain("reading");
+  expect(completed.lookedUp).toHaveLength(1);
+  expect(completed.drafts["reading-summary"]).toBe("製品についての記事です。");
+  expect(
+    saved.reviewEvents.filter((event) => event.sessionId === session.id),
+  ).toHaveLength(1);
+});
+
+test("completes checkpoint A with typed speaking fallbacks, due-only review, and wrap-up", async ({
+  page,
+}) => {
+  const { session, catalog } = await sessionFixture(
+    page,
+    "checkpoint-a",
+    0,
+    overdueCard,
+  );
+  for (let index = 0; index < 4; index++) await completeOutput(page);
+  await page
+    .getByRole("textbox", { name: /^What changed from your last recording/ })
+    .fill("少し話しやすくなりました。");
+  await page
+    .getByRole("button", { name: "Continue to a short review", exact: true })
+    .click();
+  await completeShortReview(page);
+  await completeWrap(page);
+  const saved = await progress(page);
+  const completed = saved.sessions.find((value) => value.id === session.id)!;
+  expect(completed.completedAt).not.toBeNull();
+  expect(completed.completedTasks).toEqual(
+    expect.arrayContaining([
+      "baseline-1",
+      "baseline-2",
+      "business-intro",
+      "conversation",
+    ]),
+  );
+  expect(completed.recordingIds).toEqual({});
+  expect(saved.cardStates[catalog.cards[0].id].reps).toBe(2);
+  expect(
+    saved.reviewEvents.filter((event) => event.sessionId === session.id),
+  ).toHaveLength(1);
+});
+
+test("completes checkpoint B email, unfamiliar reading, due-only review, and wrap-up", async ({
+  page,
+}) => {
+  const { session, catalog } = await sessionFixture(
+    page,
+    "checkpoint-b",
+    0,
+    overdueCard,
+  );
+  await page
+    .getByRole("button", { name: "Start ten-minute email", exact: true })
+    .click();
+  await page
+    .getByRole("textbox", { name: /^Your email in Japanese/ })
+    .fill(
+      "本日はお時間をいただき、ありがとうございました。よろしくお願いします。",
+    );
+  await page
+    .getByRole("button", { name: "Finish writing and compare", exact: true })
+    .click();
+  await page.getByRole("button", { name: "Independent", exact: true }).click();
+  await page.getByRole("button", { name: "Continue →", exact: true }).click();
+  const passage = catalog.passages.find(
+    (passage) => passage.id === session.passageId,
+  )!;
+  await completeReading(page, passage.questions, false);
+  await completeShortReview(page);
+  await completeWrap(page);
+  const saved = await progress(page);
+  const completed = saved.sessions.find((value) => value.id === session.id)!;
+  expect(completed.completedAt).not.toBeNull();
+  expect(completed.completedTasks).toEqual(
+    expect.arrayContaining(["checkpoint-email", "reading"]),
+  );
+  expect(completed.assisted).toBe(false);
+  expect(completed.lookedUp).toHaveLength(1);
+  expect(completed.drafts["reading-summary"]).toBeUndefined();
+  expect(saved.cardStates[catalog.cards[0].id].reps).toBe(2);
+});
+
+test("a manually added card can be practiced without changing its FSRS schedule", async ({
+  page,
+}) => {
+  await page.goto("./");
+  await page.getByRole("link", { name: "Mistakes", exact: true }).click();
+  await page
+    .getByRole("button", { name: "Add a card manually", exact: true })
+    .click();
+  await page
+    .getByRole("textbox", { name: "English production prompt", exact: true })
+    .fill("Greet a new colleague politely.");
+  await page
+    .getByRole("textbox", { name: "Japanese model answer", exact: true })
+    .fill("よろしくおねがいします。");
+  await page.getByRole("button", { name: "Save card", exact: true }).click();
+  await page
+    .getByRole("button", { name: "Practice this card", exact: true })
+    .click();
+  await expect(
+    page.getByText("Extra practice · does not change your review schedule.", {
+      exact: true,
+    }),
+  ).toBeVisible();
+  await page.getByRole("button", { name: "I don’t know", exact: true }).click();
+  await page.getByRole("button", { name: "Next card →", exact: true }).click();
+  const saved = await progress(page);
+  const cardId = saved.userCards[0].id;
+  expect(saved.reviewEvents).toHaveLength(0);
+  expect(saved.cardStates[cardId]).toBeUndefined();
+  expect(
+    saved.sessions.find((session) => session.kind === "extra")
+      ?.practiceGrades?.[cardId],
+  ).toBe(1);
+  expect(Object.keys(saved.mistakes)).toEqual([cardId]);
+});
