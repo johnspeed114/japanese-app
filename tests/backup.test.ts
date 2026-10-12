@@ -248,7 +248,7 @@ describe("backup restoration", () => {
     });
     const restored = await getRecordingBlob("clip");
     expect(restored?.type).toBe("audio/webm");
-    expect(new Uint8Array(await restored!.arrayBuffer())).toEqual(bytes);
+    expect(Buffer.from(await restored!.arrayBuffer()).equals(bytes)).toBe(true);
   });
   it("retains FSRS state and retired content snapshots across catalog-version changes", async () => {
     const card = {
