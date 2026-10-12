@@ -7,6 +7,8 @@ import {
   plainJapanese,
 } from "../src/japanese";
 import { parseCatalog } from "../src/validation";
+import { createSession, selectNextCard } from "../src/engine";
+import { initialProgress } from "../src/storage";
 
 const content = parseCatalog(raw);
 const production = [
@@ -24,6 +26,32 @@ const passage = (id: string) =>
   content.passages.find((item) => item.id === id)!;
 
 describe("reviewed seed content", () => {
+  it("routes reading weakness to the existing reviewed statistics production card", () => {
+    const statistics = card("card-049");
+    expect(statistics.revision).toBe(2);
+    expect(statistics.skillTags).toEqual(["vocabulary", "readings"]);
+    expect(statistics.review.status).toBe("ai-reviewed");
+    expect(plainJapanese(statistics.answer)).toBe(
+      "統計を使って結果を確認しました。",
+    );
+    expect(statistics.notes).toBe("Wrong: 統計 is とうけい; 時計 is とけい.");
+    expect(
+      [...content.cards, ...content.keigoDrills]
+        .filter((item) => item.skillTags.includes("readings"))
+        .map((item) => item.id),
+    ).toEqual(["card-049"]);
+    const data = initialProgress();
+    data.diagnosticComplete = true;
+    data.settings.plan.timezone = "UTC";
+    for (const diagnostic of content.diagnostic.filter((item) =>
+      item.skillTags.includes("readings"),
+    ))
+      data.diagnosticGrades[diagnostic.id] = 1;
+    const now = Date.UTC(2026, 9, 12, 12);
+    const session = createSession(data, "2026-10-12", now, content, "daily");
+    expect(selectNextCard(data, session, content, now, 0)?.id).toBe("card-049");
+  });
+
   it("contains the promised complete catalog with stable unique IDs", () => {
     expect([
       content.cards.length,

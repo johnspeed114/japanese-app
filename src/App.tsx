@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useRegisterSW } from "virtual:pwa-register/react";
 import { StudyProvider } from "./state";
 import { useStudy } from "./study-context";
@@ -201,7 +201,7 @@ function Today() {
         <div>
           <span className="stat-number">
             {Object.keys(data.cardStates).length}
-            <small> / 190</small>
+            <small> / {cards.length}</small>
           </span>
           <span>items introduced</span>
         </div>
@@ -595,7 +595,9 @@ function Mistakes() {
         notes: notes.trim(),
         register,
         phaseTags: ["reactivation", "core", "business", "trip"],
-        skillTags: [register === "keigo" ? "keigo" : "vocabulary"],
+        skillTags: editing?.skillTags ?? [
+          register === "keigo" ? "keigo" : "vocabulary",
+        ],
         tripRelevant: true,
         issueTags: editing?.issueTags ?? [],
         review: {
@@ -1424,6 +1426,19 @@ function SettingsScreen() {
   const [settings, setSettings] = useState<Settings>(
     structuredClone(data.settings),
   );
+  const savedVersion = useRef(
+    JSON.stringify({ ...data.settings, lastExportAt: null }),
+  );
+  useEffect(() => {
+    const next = JSON.stringify({ ...data.settings, lastExportAt: null });
+    if (next !== savedVersion.current) {
+      savedVersion.current = next;
+      setSettings(structuredClone(data.settings));
+      notify(
+        "Saved settings changed in another window or a restore. This form has been refreshed.",
+      );
+    }
+  }, [data.settings, notify]);
   const [error, setError] = useState("");
   const [storage, setStorage] = useState<{
     usage?: number;
@@ -1453,16 +1468,37 @@ function SettingsScreen() {
       window.speechSynthesis.removeEventListener("voiceschanged", refresh);
   }, []);
   const save = async () => {
+    const expectedVersion = savedVersion.current;
+    const conflictMessage =
+      "Saved settings changed elsewhere. Review the refreshed form before saving.";
     try {
       const checked = settingsSchema.parse(settings);
       setError("");
+      savedVersion.current = JSON.stringify({ ...checked, lastExportAt: null });
       await change((d) => {
+        if (
+          JSON.stringify({ ...d.settings, lastExportAt: null }) !==
+          expectedVersion
+        ) {
+          throw new Error(conflictMessage);
+        }
         d.settings = { ...checked, lastExportAt: d.settings.lastExportAt };
       });
       notify(
         "Settings saved. Existing attempts keep their original dates and content.",
       );
     } catch (e) {
+      savedVersion.current = expectedVersion;
+      if (e instanceof Error && e.message === conflictMessage) {
+        const fresh = await getProgress().catch(() => undefined);
+        if (fresh) {
+          savedVersion.current = JSON.stringify({
+            ...fresh.settings,
+            lastExportAt: null,
+          });
+          setSettings(structuredClone(fresh.settings));
+        }
+      }
       setError(e instanceof Error ? e.message : "Check your settings.");
     }
   };

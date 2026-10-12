@@ -1,8 +1,10 @@
 import "fake-indexeddb/auto";
+import catalogFixture from "../src/content/catalog.json";
 import {
   BlobReader,
   BlobWriter,
   TextReader,
+  TextWriter,
   ZipReader,
   ZipWriter,
 } from "@zip.js/zip.js";
@@ -146,6 +148,107 @@ describe("backup restoration", () => {
     expect((await getProgress()).sessions[0].recordingIds.missing).toBe(
       "missing",
     );
+  });
+  it("exports legacy Blob chunks and restores their exact bytes and original MIME type", async () => {
+    const bytes = new Uint8Array([0, 255, 128, 10, 13, 1, 2]);
+    const pointers = await initialize();
+    const db = await database();
+    await db.put(
+      "recordings",
+      {
+        id: "legacy",
+        sessionId: "session",
+        taskId: "legacy",
+        mimeType: "audio/mp4",
+        startedAt: 1000,
+        durationMs: 1234,
+        size: bytes.byteLength,
+        chunks: 2,
+        status: "complete",
+        interrupted: false,
+      },
+      [pointers.audio, "legacy"],
+    );
+    await db.put("chunks", new Blob([bytes.slice(0, 3)]), [
+      pointers.audio,
+      "legacy",
+      0,
+    ]);
+    await db.put("chunks", new Blob([bytes.slice(3)]), [
+      pointers.audio,
+      "legacy",
+      1,
+    ]);
+    await updateProgress((data) => {
+      data.sessions[0].recordingIds.legacy = "legacy";
+    });
+    const file = await exportFull();
+    const reader = new ZipReader(new BlobReader(file), {
+      useWebWorkers: false,
+    });
+    try {
+      const entry = (await reader.getEntries()).find(
+        (entry) => entry.filename === "recordings/legacy.bin",
+      )!;
+      if (entry.directory || !entry.getData)
+        throw new Error("Missing exported audio");
+      const exported = await entry.getData(new BlobWriter("audio/mp4"));
+      expect(new Uint8Array(await exported.arrayBuffer())).toEqual(bytes);
+    } finally {
+      await reader.close();
+    }
+    await reset();
+    await restoreBackup(file);
+    const restored = await getRecordingBlob("legacy");
+    expect(restored?.type).toBe("audio/mp4");
+    expect(new Uint8Array(await restored!.arrayBuffer())).toEqual(bytes);
+    expect(await getRecording("legacy")).toMatchObject({
+      mimeType: "audio/mp4",
+      durationMs: 1234,
+      size: bytes.byteLength,
+      chunks: 1,
+    });
+  });
+  it("restores a recording in bounded binary chunks when IndexedDB rejects Blob values", async () => {
+    const oneMiB = 1024 * 1024;
+    const bytes = Uint8Array.from(
+      { length: 2 * oneMiB + 17 },
+      (_, index) => index % 256,
+    );
+    await recording("clip", new Blob([bytes]));
+    const file = await exportFull();
+    await reset();
+    const originalPut = IDBObjectStore.prototype.put;
+    vi.spyOn(IDBObjectStore.prototype, "put").mockImplementation(function (
+      this: IDBObjectStore,
+      value: unknown,
+      key?: IDBValidKey,
+    ) {
+      if (this.name === "chunks" && value instanceof Blob)
+        throw new DOMException("Blob values unsupported", "DataCloneError");
+      return originalPut.call(this, value, key);
+    });
+    await restoreBackup(file);
+    const pointers = await initialize();
+    const db = await database();
+    const chunks = await db.getAll("chunks");
+    expect(chunks.length).toBeGreaterThan(1);
+    expect(chunks.every((chunk) => chunk instanceof ArrayBuffer)).toBe(true);
+    for (const chunk of chunks) {
+      expect((chunk as ArrayBuffer).byteLength).toBeGreaterThan(0);
+      expect((chunk as ArrayBuffer).byteLength).toBeLessThanOrEqual(oneMiB);
+    }
+    expect(await db.getAllKeys("chunks")).toEqual(
+      chunks.map((_, index) => [pointers.audio, "clip", index]),
+    );
+    expect(await getRecording("clip")).toMatchObject({
+      chunks: chunks.length,
+      size: bytes.byteLength,
+      mimeType: "audio/webm",
+    });
+    const restored = await getRecordingBlob("clip");
+    expect(restored?.type).toBe("audio/webm");
+    expect(new Uint8Array(await restored!.arrayBuffer())).toEqual(bytes);
   });
   it("retains FSRS state and retired content snapshots across catalog-version changes", async () => {
     const card = {
@@ -421,6 +524,74 @@ describe("backup restoration", () => {
       "original audio",
     );
   });
+  it.each(["quota", "cancellation"] as const)(
+    "preserves the original snapshot and cleans partial multi-chunk audio after %s",
+    async (failure) => {
+      const oneMiB = 1024 * 1024;
+      await recording("incoming", new Blob([new Uint8Array(2 * oneMiB + 17)]));
+      const file = await exportFull();
+      await reset();
+      await updateProgress((data) => {
+        data.sessions.push(structuredClone(session));
+        data.settings.voiceURI = "destination";
+      });
+      await recording("original", new Blob(["destination audio"]));
+      const before = await initialize();
+      const progressBefore = await getProgress();
+      const abort = new AbortController();
+      const originalPut = IDBObjectStore.prototype.put;
+      let attemptedChunks = 0;
+      let savedChunks = 0;
+      let stagedMetadata = 0;
+      const stagedSizes: number[] = [];
+      vi.spyOn(IDBObjectStore.prototype, "put").mockImplementation(function (
+        this: IDBObjectStore,
+        value: unknown,
+        key?: IDBValidKey,
+      ) {
+        const staging = Array.isArray(key) && key[0] !== before.audio;
+        if (this.name === "recordings" && staging) stagedMetadata++;
+        if (this.name === "chunks" && staging) {
+          attemptedChunks++;
+          if (failure === "quota" && attemptedChunks === 2)
+            throw new DOMException("Full", "QuotaExceededError");
+          stagedSizes.push(
+            value instanceof ArrayBuffer ? value.byteLength : -1,
+          );
+          const request = originalPut.call(this, value, key);
+          this.transaction.addEventListener("complete", () => {
+            savedChunks++;
+            if (failure === "cancellation") abort.abort();
+          });
+          return request;
+        }
+        return originalPut.call(this, value, key);
+      });
+      await expect(
+        restoreBackup(file, { signal: abort.signal }),
+      ).rejects.toMatchObject({
+        name: failure === "quota" ? "QuotaExceededError" : "AbortError",
+      });
+      expect(savedChunks).toBe(1);
+      expect(stagedSizes).toHaveLength(1);
+      expect(stagedSizes[0]).toBeGreaterThan(0);
+      expect(stagedSizes[0]).toBeLessThanOrEqual(oneMiB);
+      expect(stagedMetadata).toBe(0);
+      expect(await initialize()).toEqual(before);
+      expect(await getProgress()).toEqual(progressBefore);
+      expect(await (await getRecordingBlob("original"))?.text()).toBe(
+        "destination audio",
+      );
+      const db = await database();
+      expect(await db.getAllKeys("progress")).toEqual([before.progress]);
+      expect(await db.getAllKeys("recordings")).toEqual([
+        [before.audio, "original"],
+      ]);
+      expect(await db.getAllKeys("chunks")).toEqual([
+        [before.audio, "original", 0],
+      ]);
+    },
+  );
   it("reports durable restore success even if a final progress callback throws", async () => {
     const file = await exportProgress();
     await updateProgress((data) => {
@@ -508,7 +679,14 @@ describe("backup restoration", () => {
       "recordings/clip.bin",
     ]);
     const progress = await getProgress();
-    expect(progress.catalogVersion).toBe("1.0.0");
+    expect(progress.catalogVersion).toBe(catalogFixture.version);
+    const manifest = entries.find(
+      (entry) => entry.filename === "manifest.json",
+    )!;
+    if (manifest.directory || !manifest.getData)
+      throw new Error("Missing manifest data");
+    const envelope = JSON.parse(await manifest.getData(new TextWriter()));
+    expect(envelope.progress.catalogVersion).toBe(catalogFixture.version);
     await reader.close();
   });
 });

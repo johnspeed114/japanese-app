@@ -18,6 +18,8 @@ The author applied the review findings in the content generator and regenerated 
 
 The review also corrected the diagnostic modifier order in コンピュータサイエンスのさまざまな分野; fixed honorific/humble labels for drills that contrast the two; clarified alternative contexts; and added question punctuation to casual spoken questions. Passage edits removed unnatural collocations and an overgeneralization about small teams and data volume. The restaurant scenario now asks explicitly about vegetarian or meat/fish-free dishes and explains that stock and seasonings may need separate confirmation.
 
+A targeted metadata review on **2026-10-12** approved revision 2 of `card-049` with `readings` as a secondary skill alongside `vocabulary`. Its existing feedback explicitly contrasts 統計（とうけい） and 時計（とけい）, matching its `kanji-reading` and `long-vowels` issue tags. The prompt, Japanese models, alternatives, and item count remain unchanged. This classification reflects an intentional reading contrast; kanji appearing incidentally in keigo drills does not justify the same label.
+
 ## Verification and limits
 
 `tests/content.test.ts` checks catalog counts and unique IDs, independent review metadata, complete kana readings, relevant honorific/humble labels, glossary locations, passage lengths, speaking-turn counts, dietary wording, and contextual reading regressions. Production responses remain self-graded; accepted alternatives are examples rather than an exhaustive list of correct Japanese.

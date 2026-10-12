@@ -91,7 +91,7 @@ export function Recorder({
         if (!live || attempt !== request) return;
         if (!recording || recording.size === 0) {
           unavailable(
-            "This recording has no available audio. Record another attempt, or use your typed response.",
+            "Recording not included in this backup, or its audio is no longer available on this device. Record another attempt, or use your typed response.",
           );
           return;
         }
@@ -110,7 +110,7 @@ export function Recorder({
         if (!live || attempt !== request) return;
         if (!blob || blob.size === 0) {
           unavailable(
-            "This recording has no available audio. Record another attempt, or use your typed response.",
+            "Recording not included in this backup, or its audio is no longer available on this device. Record another attempt, or use your typed response.",
           );
           return;
         }

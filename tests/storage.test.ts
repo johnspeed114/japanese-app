@@ -231,6 +231,102 @@ describe("transactional study storage", () => {
     });
     expect(await (await getRecordingBlob("recording"))?.text()).toBe("onetwo");
   });
+  it("saves emitted audio as ArrayBuffer when IndexedDB rejects native Blob values", async () => {
+    const bytes = new Uint8Array([0, 255, 128, 1, 10, 13]);
+    const originalPut = IDBObjectStore.prototype.put;
+    vi.spyOn(IDBObjectStore.prototype, "put").mockImplementation(function (
+      this: IDBObjectStore,
+      value: unknown,
+      key?: IDBValidKey,
+    ) {
+      if (this.name === "chunks" && value instanceof Blob)
+        throw new DOMException("Blob values unsupported", "DataCloneError");
+      return originalPut.call(this, value, key);
+    });
+    await createRecording({ ...meta(), mimeType: "audio/mp4" });
+    await appendRecordingChunk("recording", 0, new Blob([bytes]));
+    await finishRecording("recording", { status: "complete" });
+
+    const pointers = await initialize();
+    const stored = await (await database()).get("chunks", [
+      pointers.audio,
+      "recording",
+      0,
+    ]);
+    expect(stored).toBeInstanceOf(ArrayBuffer);
+    expect(new Uint8Array(stored as ArrayBuffer)).toEqual(bytes);
+    expect(await getRecording("recording")).toMatchObject({
+      chunks: 1,
+      size: bytes.byteLength,
+      mimeType: "audio/mp4",
+    });
+    const restored = await getRecordingBlob("recording");
+    expect(restored?.type).toBe("audio/mp4");
+    expect(new Uint8Array(await restored!.arrayBuffer())).toEqual(bytes);
+  });
+  it("finishes asynchronous chunk conversion before opening its write transaction", async () => {
+    await createRecording(meta());
+    const bytes = new Uint8Array([1, 128, 255]);
+    const chunk = new Blob([bytes]);
+    let completeRead!: (value: ArrayBuffer) => void;
+    let markReading!: () => void;
+    const reading = new Promise<void>((resolve) => {
+      markReading = resolve;
+    });
+    vi.spyOn(chunk, "arrayBuffer").mockImplementation(() => {
+      markReading();
+      return new Promise<ArrayBuffer>((resolve) => {
+        completeRead = resolve;
+      });
+    });
+    const db = await database();
+    const transactions = vi.spyOn(db, "transaction");
+    const append = appendRecordingChunk("recording", 0, chunk);
+    await reading;
+    expect(transactions).not.toHaveBeenCalled();
+    completeRead(bytes.buffer);
+    await append;
+    expect(await getRecording("recording")).toMatchObject({
+      chunks: 1,
+      size: bytes.byteLength,
+    });
+    expect(
+      new Uint8Array(await (await getRecordingBlob("recording"))!.arrayBuffer()),
+    ).toEqual(bytes);
+  });
+  it("reads legacy Blob chunks in order alongside newly appended binary audio", async () => {
+    const pointers = await initialize();
+    const db = await database();
+    await db.put(
+      "recordings",
+      { ...meta(), mimeType: "audio/ogg", size: 4, chunks: 2 },
+      [pointers.audio, "recording"],
+    );
+    await db.put("chunks", new Blob([new Uint8Array([128, 255])]), [
+      pointers.audio,
+      "recording",
+      1,
+    ]);
+    await db.put("chunks", new Blob([new Uint8Array([0, 1])]), [
+      pointers.audio,
+      "recording",
+      0,
+    ]);
+    await appendRecordingChunk(
+      "recording",
+      2,
+      new Blob([new Uint8Array([2, 3])]),
+    );
+    const restored = await getRecordingBlob("recording");
+    expect(restored?.type).toBe("audio/ogg");
+    expect(new Uint8Array(await restored!.arrayBuffer())).toEqual(
+      new Uint8Array([0, 1, 128, 255, 2, 3]),
+    );
+    expect(await getRecording("recording")).toMatchObject({
+      chunks: 3,
+      size: 6,
+    });
+  });
   it("blocks grading and another recording while restore is staging", async () => {
     await setRestoreLock(true);
     await expect(

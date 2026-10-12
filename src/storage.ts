@@ -3,13 +3,14 @@ import type { DBSchema, IDBPDatabase } from "idb";
 import type { ProgressData, RecordingMeta } from "./types";
 import planDefaults from "./content/plan.json";
 import { settingsSchema } from "./validation";
+import { catalog } from "./content";
 export const DATABASE_NAME = "japanese-reactivation";
 export type Pointers = { progress: string; audio: string; restoring: boolean };
 interface StudyDB extends DBSchema {
   meta: { key: string; value: Pointers };
   progress: { key: string; value: ProgressData };
   recordings: { key: [string, string]; value: RecordingMeta };
-  chunks: { key: [string, string, number]; value: Blob };
+  chunks: { key: [string, string, number]; value: Blob | ArrayBuffer };
 }
 let pending: Promise<IDBPDatabase<StudyDB>> | undefined;
 let channel: BroadcastChannel | undefined;
@@ -59,7 +60,7 @@ export function initialProgress(): ProgressData {
   });
   return {
     settings,
-    catalogVersion: "1.0.0",
+    catalogVersion: catalog.version,
     cardStates: {},
     reviewEvents: [],
     sessions: [],
@@ -145,6 +146,8 @@ export async function appendRecordingChunk(
   index: number,
   chunk: Blob,
 ) {
+  // Convert before opening the transaction: Blob persistence is unreliable in WebKit.
+  const bytes = await chunk.arrayBuffer();
   const db = await database();
   const tx = db.transaction(["meta", "recordings", "chunks"], "readwrite");
   void tx.done.catch(() => undefined);
@@ -160,8 +163,8 @@ export async function appendRecordingChunk(
   }
   const key: [string, string, number] = [pointers.audio, id, index];
   if (!(await tx.objectStore("chunks").getKey(key))) {
-    await tx.objectStore("chunks").put(chunk, key);
-    meta.size += chunk.size;
+    await tx.objectStore("chunks").put(bytes, key);
+    meta.size += bytes.byteLength;
     meta.chunks = Math.max(meta.chunks, index + 1);
     await tx.objectStore("recordings").put(meta, [pointers.audio, id]);
   }

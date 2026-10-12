@@ -241,6 +241,63 @@ describe("sessions and reserved reading", () => {
     expect(first.id).not.toBe(second.id);
   });
 
+  it("keeps practice before the diagnostic from starting the plan early", () => {
+    const data = progress();
+    const content = catalog();
+    data.settings.plan.startDate = null;
+    data.diagnosticComplete = false;
+    const practice = createSession(data, "2026-10-12", NOW, content, "extra");
+    expect(data.settings.plan.startDate).toBeNull();
+    expect(practice.passageId).toBe("passage-0");
+    expect(
+      availablePassageIds(
+        data.settings.plan,
+        "2026-10-12",
+        content.passages,
+        data.sessions,
+      ),
+    ).toEqual(["passage-0", "passage-1", "passage-2"]);
+    const diagnostic = createSession(data, "2026-10-14", NOW + 1, content);
+    expect(diagnostic.kind).toBe("diagnostic");
+    expect(data.settings.plan.startDate).toBe("2026-10-14");
+    expect(
+      daysBetween(data.settings.plan.startDate!, data.settings.plan.targetDate),
+    ).toBe(49);
+    expect(checkpointCount(data.settings.plan)).toBe(6);
+    expect(practice.studyDate).toBe("2026-10-12");
+  });
+
+  it("restores the earliest diagnostic anchor before choosing checkpoints without redating history", () => {
+    const data = progress();
+    const content = catalog();
+    data.settings.plan.startDate = "2026-10-14";
+    createSession(data, "2026-10-15", NOW, content, "diagnostic");
+    createSession(data, "2026-10-14", NOW + 1, content, "diagnostic");
+    createSession(data, "2026-10-16", NOW + 2, content, "daily");
+    const historicalDates = data.sessions.map((session) => [
+      session.id,
+      session.studyDate,
+    ]);
+    data.settings.plan.startDate = null;
+    const checkpoint = createSession(data, "2026-10-21", NOW + 3, content);
+    expect(data.settings.plan.startDate).toBe("2026-10-14");
+    expect(checkpoint.kind).toBe("checkpoint-b");
+    expect(checkpoint.checkpointIndex).toBe(0);
+    expect(
+      data.sessions
+        .slice(0, 3)
+        .map((session) => [session.id, session.studyDate]),
+    ).toEqual(historicalDates);
+  });
+
+  it("anchors ordinary legacy study on its date when no diagnostic history exists", () => {
+    const data = progress();
+    data.settings.plan.startDate = null;
+    const session = createSession(data, "2026-10-14", NOW, catalog());
+    expect(session.kind).toBe("daily");
+    expect(data.settings.plan.startDate).toBe("2026-10-14");
+  });
+
   it("alternates only after completed ordinary sessions", () => {
     const data = progress();
     const content = catalog();

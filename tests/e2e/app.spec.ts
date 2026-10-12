@@ -1,10 +1,17 @@
 import { readFile } from "node:fs/promises";
+import {
+  TextReader,
+  Uint8ArrayReader,
+  Uint8ArrayWriter,
+  ZipWriter,
+} from "@zip.js/zip.js";
 import { expect, test } from "@playwright/test";
-import type { Page } from "@playwright/test";
+import type { BrowserContext, Page } from "@playwright/test";
 import type {
   Catalog,
   ProductionItem,
   ProgressData,
+  RecordingMeta,
   Session,
 } from "../../src/types";
 import {
@@ -41,6 +48,149 @@ async function progress(page: Page): Promise<ProgressData> {
       }),
   );
 }
+
+// This exercises browser event handling and IndexedDB, not a microphone or codec.
+// The emitted bytes are deliberately synthetic and cannot be used for playback QA.
+async function simulatedMicrophone(context: BrowserContext, denied = false) {
+  await context.addInitScript(
+    ({ denied }) => {
+      const simulation = {
+        constraints: undefined as MediaStreamConstraints | undefined,
+        options: undefined as MediaRecorderOptions | undefined,
+        timeslice: 0,
+        events: [] as string[],
+        stoppedTracks: 0,
+      };
+      Object.defineProperty(window, "__recordingSimulation", {
+        value: simulation,
+      });
+      class SimulatedTrack extends EventTarget {
+        readyState = "live";
+        stop() {
+          this.readyState = "ended";
+          simulation.stoppedTracks++;
+        }
+      }
+      Object.defineProperty(navigator, "mediaDevices", {
+        configurable: true,
+        value: {
+          async getUserMedia(constraints: MediaStreamConstraints) {
+            simulation.constraints = constraints;
+            if (denied)
+              throw new DOMException(
+                "Simulated permission denial",
+                "NotAllowedError",
+              );
+            const track = new SimulatedTrack();
+            return { getTracks: () => [track] };
+          },
+        },
+      });
+      class SimulatedMediaRecorder extends EventTarget {
+        static isTypeSupported(type: string) {
+          return type === "audio/webm;codecs=opus";
+        }
+        state = "inactive";
+        mimeType: string;
+        constructor(_stream: unknown, options: MediaRecorderOptions) {
+          super();
+          simulation.options = options;
+          this.mimeType = options.mimeType ?? "audio/webm";
+        }
+        emitChunk = () => {
+          if (this.state === "recording") this.emit("periodic");
+        };
+        emit(kind: "periodic" | "final") {
+          simulation.events.push(`data-${kind}`);
+          const event = new Event("dataavailable");
+          Object.defineProperty(event, "data", {
+            value: new Blob([`simulated ${kind} chunk\n`], {
+              type: this.mimeType,
+            }),
+          });
+          this.dispatchEvent(event);
+        }
+        start(timeslice: number) {
+          this.state = "recording";
+          simulation.timeslice = timeslice;
+          simulation.events.push("start");
+          window.addEventListener("simulation-recording-chunk", this.emitChunk);
+        }
+        stop() {
+          if (this.state === "inactive") return;
+          this.state = "inactive";
+          simulation.events.push("stop-request");
+          window.removeEventListener(
+            "simulation-recording-chunk",
+            this.emitChunk,
+          );
+          setTimeout(() => {
+            this.emit("final");
+            simulation.events.push("stop");
+            this.dispatchEvent(new Event("stop"));
+          }, 0);
+        }
+      }
+      Object.defineProperty(window, "MediaRecorder", {
+        configurable: true,
+        value: SimulatedMediaRecorder,
+      });
+    },
+    { denied },
+  );
+}
+
+async function storedAudio(page: Page, id: string) {
+  return page.evaluate(
+    (id) =>
+      new Promise<{
+        meta?: RecordingMeta;
+        chunks: number;
+        content: string;
+      }>((resolve, reject) => {
+        const opening = indexedDB.open("japanese-reactivation");
+        opening.onerror = () => reject(opening.error);
+        opening.onsuccess = () => {
+          const db = opening.result;
+          const tx = db.transaction(["meta", "recordings", "chunks"]);
+          let recording: RecordingMeta | undefined;
+          let parts: BlobPart[] = [];
+          const pointers = tx.objectStore("meta").get("active");
+          pointers.onsuccess = () => {
+            const meta = tx
+              .objectStore("recordings")
+              .get([pointers.result.audio, id]);
+            meta.onsuccess = () => {
+              recording = meta.result as RecordingMeta | undefined;
+            };
+            const chunks = tx
+              .objectStore("chunks")
+              .getAll(
+                IDBKeyRange.bound(
+                  [pointers.result.audio, id, 0],
+                  [pointers.result.audio, id, Number.MAX_SAFE_INTEGER],
+                ),
+              );
+            chunks.onsuccess = () => {
+              parts = chunks.result as BlobPart[];
+            };
+          };
+          tx.oncomplete = () => {
+            db.close();
+            void new Blob(parts).text().then((content) => {
+              resolve({ meta: recording, chunks: parts.length, content });
+            }, reject);
+          };
+          tx.onabort = () => {
+            db.close();
+            reject(tx.error);
+          };
+        };
+      }),
+    id,
+  );
+}
+
 async function start(page: Page) {
   await page.goto("./");
   await page.getByRole("button", { name: /^Start diagnostic/ }).click();
@@ -258,6 +408,206 @@ test("an idle diagnostic keeps the speaking target separate from elapsed wall ti
     page.getByRole("button", { name: "Finish this attempt", exact: true }),
   ).toBeDisabled();
   expect((await progress(page)).sessions[0].recordingIds).toEqual({});
+});
+
+test("simulated browser recording saves periodic and final chunks before completion", async ({
+  page,
+  context,
+}) => {
+  await simulatedMicrophone(context);
+  await start(page);
+  const session = (await progress(page)).sessions[0];
+  await page
+    .getByRole("button", { name: "Record response", exact: true })
+    .click();
+  await expect(
+    page.getByRole("button", { name: "Stop and save", exact: true }),
+  ).toBeVisible();
+  await page.evaluate(() =>
+    window.dispatchEvent(new Event("simulation-recording-chunk")),
+  );
+  await page
+    .getByRole("button", { name: "Stop and save", exact: true })
+    .click();
+  await expect
+    .poll(
+      async () => (await progress(page)).sessions[0].recordingIds["baseline-1"],
+    )
+    .toBeTruthy();
+  const id = (await progress(page)).sessions[0].recordingIds["baseline-1"];
+  const audio = await storedAudio(page, id);
+  expect(audio.content).toBe(
+    "simulated periodic chunk\nsimulated final chunk\n",
+  );
+  expect(audio.chunks).toBe(2);
+  expect(audio.meta).toMatchObject({
+    id,
+    sessionId: session.id,
+    taskId: "baseline-1",
+    mimeType: "audio/webm;codecs=opus",
+    size: Buffer.byteLength(audio.content),
+    chunks: 2,
+    status: "complete",
+    interrupted: false,
+  });
+  expect(
+    await page.evaluate(() => Reflect.get(window, "__recordingSimulation")),
+  ).toMatchObject({
+    constraints: { audio: { channelCount: 1 }, video: false },
+    options: { audioBitsPerSecond: 32_000 },
+    timeslice: 5_000,
+    stoppedTracks: 1,
+    events: ["start", "data-periodic", "stop-request", "data-final", "stop"],
+  });
+  await expect(
+    page.getByRole("button", { name: "Record another attempt", exact: true }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("button", { name: "Finish this attempt", exact: true }),
+  ).toBeEnabled();
+  await page.reload();
+  await expect(
+    page.getByLabel("Your recorded response", { exact: true }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("button", { name: "Finish this attempt", exact: true }),
+  ).toBeEnabled();
+  expect((await storedAudio(page, id)).content).toBe(audio.content);
+});
+
+test("simulated microphone denial opens the typed fallback without saving audio", async ({
+  page,
+  context,
+}) => {
+  await simulatedMicrophone(context, true);
+  await start(page);
+  await page
+    .getByRole("button", { name: "Record response", exact: true })
+    .click();
+  await expect(page.getByRole("alert")).toHaveText(
+    /Microphone access was denied/,
+  );
+  const answer = page.getByRole("textbox", {
+    name: /^Typed Japanese response/,
+  });
+  await expect(answer).toBeVisible();
+  await expect(
+    page.getByRole("button", { name: "Finish this attempt", exact: true }),
+  ).toBeDisabled();
+  expect((await progress(page)).sessions[0].recordingIds).toEqual({});
+  await answer.fill("マイクが使えないので、入力して練習します。");
+  await expect(
+    page.getByRole("button", { name: "Finish this attempt", exact: true }),
+  ).toBeEnabled();
+  await page
+    .getByRole("button", { name: "Finish this attempt", exact: true })
+    .click();
+  await page.getByRole("button", { name: "Independent", exact: true }).click();
+  await page.getByRole("button", { name: "Continue →", exact: true }).click();
+  await expect
+    .poll(async () => (await progress(page)).sessions[0].completedTasks)
+    .toContain("baseline-1");
+  const saved = await progress(page);
+  expect(saved.sessions[0].completedTasks).toContain("baseline-1");
+  expect(saved.sessions[0].recordingIds).toEqual({});
+  expect(saved.sessions[0].drafts["baseline-1"]).toBe(
+    "マイクが使えないので、入力して練習します。",
+  );
+});
+
+test("a simulated decoder error after ZIP transfer explains unsupported audio and preserves its download", async ({
+  page,
+}) => {
+  await start(page);
+  const data = await progress(page);
+  const session = data.sessions[0];
+  const bytes = new TextEncoder().encode(
+    "synthetic transferred audio; not a codec fixture",
+  );
+  const meta: RecordingMeta = {
+    id: "transferred-audio",
+    sessionId: session.id,
+    taskId: "baseline-1",
+    mimeType: "audio/mp4;codecs=simulated-unsupported",
+    startedAt: Date.now(),
+    durationMs: 1_200,
+    size: bytes.byteLength,
+    chunks: 1,
+    status: "complete",
+    interrupted: false,
+  };
+  session.recordingIds["baseline-1"] = meta.id;
+  const writer = new ZipWriter(new Uint8ArrayWriter(), {
+    level: 0,
+    useWebWorkers: false,
+  });
+  await writer.add(
+    "manifest.json",
+    new TextReader(
+      JSON.stringify({
+        format: "japanese-reactivation",
+        version: 1,
+        kind: "full",
+        exportedAt: new Date().toISOString(),
+        progress: data,
+        recordings: [
+          {
+            id: meta.id,
+            meta,
+            included: true,
+            file: `recordings/${meta.id}.bin`,
+          },
+        ],
+      }),
+    ),
+  );
+  await writer.add(`recordings/${meta.id}.bin`, new Uint8ArrayReader(bytes));
+  const archive = await writer.close();
+  await page.getByRole("link", { name: "Settings", exact: true }).click();
+  await page
+    .getByLabel("Choose a JSON or ZIP backup", { exact: true })
+    .setInputFiles({
+      name: "transferred-recording.zip",
+      mimeType: "application/zip",
+      buffer: Buffer.from(archive),
+    });
+  await expect(
+    page.getByRole("heading", { name: "Restore preview", exact: true }),
+  ).toBeVisible();
+  await page
+    .getByRole("checkbox", {
+      name: "I understand what will be replaced and have saved any backup I need.",
+    })
+    .check();
+  await page
+    .getByRole("button", { name: "Restore this backup", exact: true })
+    .click();
+  await expect
+    .poll(
+      async () => (await progress(page)).sessions[0].recordingIds["baseline-1"],
+    )
+    .toBe(meta.id);
+  await page.goto(`./#/session/${session.id}`);
+  const playback = page.getByLabel("Your recorded response", { exact: true });
+  await expect(playback).toBeVisible();
+  // Explicitly simulate the receiving device's decoder error; no codec support is asserted.
+  await playback.dispatchEvent("error");
+  await expect(
+    page.getByText(/This device cannot play this recording format/),
+  ).toBeVisible();
+  const download = page.waitForEvent("download");
+  await page
+    .getByRole("link", { name: "Download this recording", exact: true })
+    .click();
+  const savedFile = await download;
+  expect(savedFile.suggestedFilename()).toBe("baseline-1.m4a");
+  expect(await readFile((await savedFile.path())!)).toEqual(Buffer.from(bytes));
+  const stored = await storedAudio(page, meta.id);
+  expect(stored.meta?.mimeType).toBe(meta.mimeType);
+  expect(stored.content).toBe(new TextDecoder().decode(bytes));
+  expect((await progress(page)).sessions[0].recordingIds["baseline-1"]).toBe(
+    meta.id,
+  );
 });
 
 test("IME confirmation never submits and two rapid grade clicks save once", async ({
@@ -502,6 +852,73 @@ test("progress JSON preview and restore replace drafts after explicit confirmati
   ).toHaveValue("45");
 });
 
+test("a restore in another tab refreshes settings while an export preserves unsaved preferences", async ({
+  page,
+  context,
+}) => {
+  await context.addInitScript(() => {
+    Object.defineProperty(navigator, "canShare", {
+      configurable: true,
+      value: () => false,
+    });
+  });
+  await start(page);
+  await page.getByRole("link", { name: "Settings", exact: true }).click();
+  const minutes = page.getByRole("spinbutton", {
+    name: "Daily minutes",
+    exact: true,
+  });
+  await minutes.fill("40");
+  const other = await context.newPage();
+  await other.goto("./#/settings");
+  await other
+    .getByRole("button", { name: "Prepare progress JSON", exact: true })
+    .click();
+  const downloading = other.waitForEvent("download");
+  await other
+    .getByRole("button", { name: "Save / share backup", exact: true })
+    .click();
+  const exported = await downloading;
+  await expect
+    .poll(async () => (await progress(page)).settings.lastExportAt)
+    .not.toBeNull();
+  await expect(minutes).toHaveValue("40");
+  const envelope = JSON.parse(await readFile((await exported.path())!, "utf8"));
+  envelope.progress.settings.plan.dailyMinutes = 45;
+  await other
+    .getByLabel("Choose a JSON or ZIP backup", { exact: true })
+    .setInputFiles({
+      name: "other-tab-restore.json",
+      mimeType: "application/json",
+      buffer: Buffer.from(JSON.stringify(envelope)),
+    });
+  await expect(
+    other.getByRole("heading", { name: "Restore preview", exact: true }),
+  ).toBeVisible();
+  await other
+    .getByRole("checkbox", {
+      name: "I understand what will be replaced and have saved any backup I need.",
+    })
+    .check();
+  await other
+    .getByRole("button", { name: "Restore this backup", exact: true })
+    .click();
+  await expect(minutes).toHaveValue("45");
+  await page
+    .getByRole("button", { name: "Save settings", exact: true })
+    .click();
+  await expect(page.getByRole("status")).toContainText(
+    "Settings saved. Existing attempts keep their original dates and content.",
+  );
+  await expect
+    .poll(async () => (await progress(page)).settings.plan.dailyMinutes)
+    .toBe(45);
+  await page.reload();
+  await expect(
+    page.getByRole("spinbutton", { name: "Daily minutes", exact: true }),
+  ).toHaveValue("45");
+});
+
 test("missing audio in a progress restore cannot complete speaking or a reading summary", async ({
   page,
 }) => {
@@ -544,7 +961,7 @@ test("missing audio in a progress restore cannot complete speaking or a reading 
     .toBe("missing-baseline-audio");
   await page.goto(`./#/session/${baseline.id}`);
   await expect(
-    page.getByText(/This recording has no available audio/),
+    page.getByText(/Recording not included in this backup/),
   ).toBeVisible();
   await expect(
     page.getByRole("button", { name: "Finish this attempt", exact: true }),
@@ -576,7 +993,7 @@ test("missing audio in a progress restore cannot complete speaking or a reading 
   for (const question of passage.questions)
     await page.getByLabel(question.prompt).fill("記事の内容を説明します。");
   await expect(
-    page.getByText(/This recording has no available audio/),
+    page.getByText(/Recording not included in this backup/),
   ).toBeVisible();
   await expect(
     page.getByRole("button", {

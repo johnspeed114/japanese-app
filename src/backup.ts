@@ -1,6 +1,5 @@
 import {
   BlobReader,
-  BlobWriter,
   TextReader,
   TextWriter,
   ZipReader,
@@ -24,6 +23,7 @@ import type { ProgressData } from "./types";
 import { resolveReviewContent } from "./engine";
 const MAX_CLIP = 64 * 1024 * 1024;
 const MAX_MANIFEST = 16 * 1024 * 1024;
+const RESTORE_CHUNK_BYTES = 1024 * 1024;
 const inventorySchema = z.object({
   id: z.string().regex(/^[a-zA-Z0-9_-]{1,128}$/),
   included: z.boolean(),
@@ -341,18 +341,41 @@ async function performRestore(file: File, options: JobOptions) {
         const entry = source.entries.find((e) => e.filename === row.file)!;
         if (entry.directory || !entry.getData)
           throw new Error("An audio file cannot be read.");
-        const blob = await entry.getData(new BlobWriter(row.meta!.mimeType), {
-          signal: options.signal,
-        });
-        if (blob.size !== row.meta!.size)
+        let chunks = 0;
+        let size = 0;
+        await entry.getData(
+          new WritableStream<Uint8Array>({
+            async write(decoded) {
+              abortIfNeeded(options.signal);
+              size += decoded.byteLength;
+              if (size > MAX_CLIP || size > row.meta!.size)
+                throw new Error("Audio size failed validation.");
+              for (
+                let offset = 0;
+                offset < decoded.byteLength;
+                offset += RESTORE_CHUNK_BYTES
+              ) {
+                abortIfNeeded(options.signal);
+                const bytes = new Uint8Array(
+                  decoded.subarray(offset, offset + RESTORE_CHUNK_BYTES),
+                ).buffer;
+                const tx = db.transaction("chunks", "readwrite");
+                void tx.done.catch(() => undefined);
+                await tx.store.put(bytes, [audioGen, row.id, chunks]);
+                await tx.done;
+                chunks++;
+              }
+            },
+          }),
+          { signal: options.signal },
+        );
+        if (size !== row.meta!.size)
           throw new Error("Audio size failed validation.");
-        const tx = db.transaction(["recordings", "chunks"], "readwrite");
-        void tx.done.catch(() => undefined);
-        await tx
-          .objectStore("recordings")
-          .put({ ...row.meta!, chunks: 1 }, [audioGen, row.id]);
-        await tx.objectStore("chunks").put(blob, [audioGen, row.id, 0]);
-        await tx.done;
+        abortIfNeeded(options.signal);
+        await db.put("recordings", { ...row.meta!, chunks }, [
+          audioGen,
+          row.id,
+        ]);
         index++;
       }
     abortIfNeeded(options.signal);

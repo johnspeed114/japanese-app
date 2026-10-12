@@ -257,7 +257,16 @@ export function createSession(
 ): Session {
   ordinal(date);
   const plan = data.settings.plan;
-  if (!plan.startDate) plan.startDate = date;
+  if (!plan.startDate && kindOverride !== "extra") {
+    const diagnosticDates = data.sessions
+      .filter((session) => session.kind === "diagnostic")
+      .map((session) => session.studyDate);
+    plan.startDate = diagnosticDates.reduce(
+      (earliest, diagnosticDate) =>
+        diagnosticDate < earliest ? diagnosticDate : earliest,
+      diagnosticDates[0] ?? date,
+    );
+  }
   const checkpoint = checkpointOnDate(plan, date);
   const kind =
     kindOverride ??

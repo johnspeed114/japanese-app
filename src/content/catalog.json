@@ -1,5 +1,5 @@
 {
-  "version": "2026.10.12.1",
+  "version": "2026.10.12.2",
   "cards": [
     {
       "id": "card-001",
@@ -1539,7 +1539,7 @@
     },
     {
       "id": "card-049",
-      "revision": 1,
+      "revision": 2,
       "kind": "card",
       "prompt": "Say you used statistics to check the results.",
       "answer": "[[統計|とうけい]]を[[使|つか]]って[[結果|けっか]]を[[確認|かくにん]]しました。",
@@ -1557,7 +1557,8 @@
         "trip"
       ],
       "skillTags": [
-        "vocabulary"
+        "vocabulary",
+        "readings"
       ],
       "tripRelevant": true,
       "issueTags": [

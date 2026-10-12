@@ -148,7 +148,7 @@ const review = process.argv.includes("--ai-reviewed")
     }
   : { status: "draft", reviewer: "author", date: "2026-10-12" };
 const catalog = {
-  version: "2026.10.12.1",
+  version: "2026.10.12.2",
   cards: [],
   keigoDrills: [],
   diagnostic: [],
@@ -393,6 +393,11 @@ for (const [rows, defaults] of [
     })),
   );
 }
+
+const statistics = catalog.cards.find((item) => item.id === "card-049");
+if (!statistics) throw new Error("The statistics production card is missing.");
+statistics.revision = 2;
+statistics.skillTags = ["vocabulary", "readings"];
 
 const honorific = lines(`
 Respect the CEO's action: the CEO will come tomorrow.|社長は明日いらっしゃいます。|社長は明日お越しになります。|Register choice: honorific language raises the CEO's action.|honorific
