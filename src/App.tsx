@@ -1533,7 +1533,7 @@ function SettingsScreen() {
           Show furigana on model answers and ordinary passages
         </label>
         <label className="field">
-          <span>Japanese speech voice</span>
+          <span>Japanese device voice (fallback)</span>
           <select
             value={settings.voiceURI}
             onChange={(e) =>
@@ -1549,10 +1549,15 @@ function SettingsScreen() {
             ))}
           </select>
         </label>
+        <p className="muted">
+          Built-in listening uses Marin, an AI-generated Japanese voice, with
+          recordings saved for offline playback. New or edited text can use your
+          device voice above.
+        </p>
         {voices.length === 0 && (
           <p className="muted">
-            No Japanese voice is currently listed. Text practice still works; a
-            device voice can become available after installation.
+            No Japanese device voice is currently listed. The built-in recordings
+            still work. A device voice can become available after installation.
           </p>
         )}
         <div className="filter-row">

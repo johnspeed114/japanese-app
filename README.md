@@ -2,7 +2,7 @@
 
 A personal Japanese study app for returning to conversations with a friendly CEO, Japanese-speaking employees, old colleagues, and friends before a Tokyo trip on December 2, 2026. It assumes prior experience living and working in Japan, rather than beginner study.
 
-Milestone 1 runs entirely in your browser: no app account, API key, paid service, or cloud storage. Your progress and recordings stay on the device. Milestone 2’s AI tutor is not implemented.
+Milestone 1 runs entirely in your browser: no app account, runtime API key, paid playback, or cloud storage. Your progress and recordings stay on the device. The user separately authorized paid OpenAI generation of the bundled Japanese listening audio. Milestone 2’s AI tutor is not implemented.
 
 ## Run locally
 
@@ -52,7 +52,11 @@ Weekly speaking and writing/reading checkpoints replace normal sessions. The pla
 
 Back up regularly, especially before changing devices, clearing browser data, or updating the operating system. Transfers do not merge histories or synchronize devices. Stop recording before a backup or restore. Restore validates and stages all data before switching the active storage generation; malformed, cancelled, or quota-limited imports preserve the existing history.
 
-Recording requests mono audio at 32 kbps, saves emitted chunks during capture, and stops after fifteen minutes. Keep the app visible. An interruption saves what it can and marks the attempt incomplete; partial audio may not play. Speech playback uses a Japanese device voice, prefers a local voice, and may need internet access when only a remote voice is available.
+Recording requests mono audio at 32 kbps, saves emitted chunks during capture, and stops after fifteen minutes. Keep the app visible. An interruption saves what it can and marks the attempt incomplete; partial audio may not play.
+
+Built-in Listen buttons play bundled Japanese recordings generated with OpenAI’s Marin voice. This is AI-generated speech, not a human recording or a GPT-Live conversation. Sentence clips use authored pronunciation cues and are cached with the app for offline playback after initial loading. Playback starts only from a tap. New or edited text without a matching recording uses the selected Japanese device voice; if a bundled clip fails, the app offers an explicit device-voice fallback. A remote device voice may need internet access. Audio generation costs money once; listening does not make API calls or consume credits. Pronunciation and naturalness still need a native speaker’s listening check.
+
+Maintainers can verify speech assets without a key using `npm run speech:check`. To regenerate missing or changed clips after authorizing API use, `npm run speech:generate` reads `OPENAI_API_KEY` from the ignored `.env.local` file, preserves valid completed clips, and saves progress after each clip. Builds and CI never generate speech, and the browser receives no key. The selected model is recorded in the manifest; its API retirement does not affect existing recordings. See [OpenAI’s speech documentation](https://developers.openai.com/api/docs/guides/text-to-speech).
 
 ## Review and hosting
 

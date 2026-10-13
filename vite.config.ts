@@ -21,6 +21,9 @@ export default defineConfig({
     react(),
     VitePWA({
       registerType: "prompt",
+      strategies: "injectManifest",
+      srcDir: "src",
+      filename: "sw.ts",
       includeAssets: [
         "icon.svg",
         "icon-180.png",
@@ -58,9 +61,10 @@ export default defineConfig({
           },
         ],
       },
-      workbox: {
-        globPatterns: ["**/*.{js,css,html,svg,png,json,wasm}"],
+      injectManifest: {
+        globPatterns: ["**/*.{js,css,html,svg,png,json,wasm,mp3}"],
         maximumFileSizeToCacheInBytes: 5_000_000,
+        rollupFormat: "iife",
       },
     }),
   ],

@@ -5,6 +5,17 @@ import {
   startCapture,
 } from "../src/audio";
 import { japaneseVoice, speechSentences } from "../src/components/SpeechButton";
+import {
+  playDeviceSpeech,
+  playJapaneseAudio,
+  resolveSpeechClips,
+  speechTextKey,
+} from "../src/speech-audio";
+import type {
+  SpeechClip,
+  SpeechManifest,
+  SpeechPlaybackController,
+} from "../src/speech-audio";
 
 const storage = vi.hoisted(() => ({
   createRecording: vi.fn(),
@@ -322,5 +333,411 @@ describe("Japanese speech selection", () => {
       "元気ですか？",
       "そうです！",
     ]);
+  });
+});
+
+const clips: readonly SpeechClip[] = [
+  { text: "こんにちは。", file: "speech/hello.mp3" },
+  { text: "元気ですか？", file: "speech/question.mp3" },
+  { text: "また会いましょう。", file: "speech/goodbye.mp3" },
+];
+const manifest = (entries: SpeechManifest["entries"]): SpeechManifest => ({
+  version: 1,
+  model: "test-model",
+  voice: "test-voice",
+  generatedAt: "2026-10-13T00:00:00.000Z",
+  entries,
+});
+
+describe("prerecorded Japanese speech lookup", () => {
+  it("uses plain ruby text and normalized whitespace while preserving exact wording", () => {
+    const spoken = [{ text: "御社 の製品ですか？", file: "speech/question.mp3" }];
+    const catalog = manifest({ "御社 の製品ですか？": spoken });
+    expect(
+      resolveSpeechClips("\n[[御社|おんしゃ]]\t の製品ですか？  ", catalog),
+    ).toBe(spoken);
+    expect(resolveSpeechClips("御社 の製品ですか。", catalog)).toBeUndefined();
+    expect(resolveSpeechClips("御社 の製品ですか？追加", catalog)).toBeUndefined();
+    expect(speechTextKey("ＡＩです！")).toBe("ＡＩです！");
+  });
+  it("resolves a spoken override independently of the displayed wording", () => {
+    const display = "今日は[[製品|せいひん]]を見せてください。";
+    const override = "今日は製品を紹介してください。";
+    const spoken = [{ text: override, file: "speech/override.mp3" }];
+    const catalog = manifest({ [override]: spoken });
+    expect(resolveSpeechClips(override, catalog)).toBe(spoken);
+    expect(resolveSpeechClips(display, catalog)).toBeUndefined();
+  });
+  it("keeps punctuation groups and closing quotes with their spoken sentence", () => {
+    expect(
+      speechSentences("「[[製品|せいひん]]ですか？！」\n『はい！！』 続きです。"),
+    ).toEqual(["「製品ですか？！」", "『はい！！』", "続きです。"]);
+  });
+});
+
+class PlaybackAudio extends EventTarget {
+  static instances: PlaybackAudio[] = [];
+  static attempts: (() => Promise<void>)[] = [];
+  src = "";
+  preload = "";
+  playedFiles: string[] = [];
+  play = vi.fn(() => {
+    this.playedFiles.push(this.src);
+    return (PlaybackAudio.attempts.shift() ?? (() => Promise.resolve()))();
+  });
+  pause = vi.fn();
+  load = vi.fn();
+  removeAttribute = vi.fn((name: string) => {
+    if (name === "src") this.src = "";
+  });
+  removeEventListener = vi.fn(
+    (
+      type: string,
+      callback: EventListenerOrEventListenerObject | null,
+      eventOptions?: EventListenerOptions | boolean,
+    ) => super.removeEventListener(type, callback, eventOptions),
+  );
+  constructor() {
+    super();
+    PlaybackAudio.instances.push(this);
+  }
+}
+class DeviceUtterance {
+  text: string;
+  voice: SpeechSynthesisVoice | null = null;
+  lang = "";
+  rate = 1;
+  onend: ((event: SpeechSynthesisEvent) => unknown) | null = null;
+  onerror: ((event: SpeechSynthesisErrorEvent) => unknown) | null = null;
+  constructor(text: string) {
+    this.text = text;
+  }
+}
+const endUtterance = (utterance: DeviceUtterance) =>
+  utterance.onend?.(new Event("end") as SpeechSynthesisEvent);
+const speechError = (error: SpeechSynthesisErrorCode) =>
+  Object.assign(new Event("error"), { error }) as SpeechSynthesisErrorEvent;
+
+describe("Japanese speech playback", () => {
+  const baseURL = "https://study.example/japanese-app/";
+  const local = voice("ja-JP", "local", true);
+  const remote = voice("ja-JP", "remote", false);
+  let windowMock: EventTarget;
+  let synthesis: {
+    getVoices: ReturnType<typeof vi.fn<() => SpeechSynthesisVoice[]>>;
+    speak: ReturnType<typeof vi.fn<(utterance: DeviceUtterance) => void>>;
+    cancel: ReturnType<typeof vi.fn<() => void>>;
+  };
+  let controllers: SpeechPlaybackController[];
+  const own = (controller: SpeechPlaybackController) => {
+    controllers.push(controller);
+    return controller;
+  };
+  beforeEach(() => {
+    PlaybackAudio.instances = [];
+    PlaybackAudio.attempts = [];
+    controllers = [];
+    synthesis = {
+      getVoices: vi.fn(() => [remote, local]),
+      speak: vi.fn(),
+      cancel: vi.fn(),
+    };
+    windowMock = Object.assign(new EventTarget(), { speechSynthesis: synthesis });
+    vi.stubGlobal("window", windowMock);
+    vi.stubGlobal("Audio", PlaybackAudio);
+    vi.stubGlobal("SpeechSynthesisUtterance", DeviceUtterance);
+  });
+  afterEach(() => {
+    for (const controller of controllers) controller.stop();
+  });
+
+  it("starts on request and plays the manifest's sentence order through one audio element", async () => {
+    const spoken = "こんにちは。元気ですか？また会いましょう。";
+    const playlist = resolveSpeechClips(spoken, manifest({ [spoken]: clips }))!;
+    expect(PlaybackAudio.instances).toHaveLength(0);
+    const onState = vi.fn();
+    own(playJapaneseAudio({ clips: playlist, baseURL, onState }));
+    await flush();
+    expect(PlaybackAudio.instances).toHaveLength(1);
+    const audio = PlaybackAudio.instances[0];
+    expect(audio.playedFiles).toEqual([`${baseURL}speech/hello.mp3`]);
+    expect(onState).toHaveBeenLastCalledWith({ source: "ai", status: "playing" });
+    audio.dispatchEvent(new Event("ended"));
+    await flush();
+    expect(audio.playedFiles).toEqual([
+      `${baseURL}speech/hello.mp3`,
+      `${baseURL}speech/question.mp3`,
+    ]);
+    audio.dispatchEvent(new Event("ended"));
+    await flush();
+    expect(audio.playedFiles).toEqual(clips.map((clip) => `${baseURL}${clip.file}`));
+    audio.dispatchEvent(new Event("ended"));
+    expect(onState).toHaveBeenLastCalledWith({ source: "ai", status: "ended" });
+    expect(
+      onState.mock.calls.filter(([state]) => state.status === "ended"),
+    ).toHaveLength(1);
+    expect(audio.pause).toHaveBeenCalledOnce();
+    expect(audio.removeAttribute).toHaveBeenCalledWith("src");
+    expect(audio.load).toHaveBeenCalledOnce();
+    expect(synthesis.speak).not.toHaveBeenCalled();
+  });
+
+  it.each(["stop", "hashchange"])(
+    "stops the playlist on %s and removes handlers before later media events",
+    async (reason) => {
+      const onState = vi.fn();
+      const controller = own(playJapaneseAudio({ clips, baseURL, onState }));
+      await flush();
+      const audio = PlaybackAudio.instances[0];
+      if (reason === "stop") controller.stop();
+      else windowMock.dispatchEvent(new Event("hashchange"));
+      expect(onState).toHaveBeenLastCalledWith({ source: "ai", status: "stopped" });
+      expect(audio.removeEventListener).toHaveBeenCalledWith(
+        "ended", expect.any(Function),
+      );
+      expect(audio.removeEventListener).toHaveBeenCalledWith(
+        "error", expect.any(Function),
+      );
+      expect(audio.pause).toHaveBeenCalledOnce();
+      expect(audio.src).toBe("");
+      expect(audio.load).toHaveBeenCalledOnce();
+      const states = onState.mock.calls.length;
+      audio.dispatchEvent(new Event("ended"));
+      audio.dispatchEvent(new Event("error"));
+      controller.stop();
+      await flush();
+      expect(onState).toHaveBeenCalledTimes(states);
+      expect(audio.play).toHaveBeenCalledOnce();
+      expect(audio.pause).toHaveBeenCalledOnce();
+    },
+  );
+
+  it.each(["resolve", "reject"])(
+    "ignores an old play promise's %s after a new audio player takes ownership",
+    async (settlement) => {
+      let resolve!: () => void;
+      let reject!: (error: Error) => void;
+      PlaybackAudio.attempts.push(
+        () => new Promise<void>((done, fail) => {
+          resolve = done;
+          reject = fail;
+        }),
+      );
+      const oldState = vi.fn();
+      const old = own(playJapaneseAudio({ clips, baseURL, onState: oldState }));
+      const newState = vi.fn();
+      own(playJapaneseAudio({ clips: [clips[1]], baseURL, onState: newState }));
+      await flush();
+      expect(oldState).toHaveBeenLastCalledWith({ source: "ai", status: "stopped" });
+      const oldCalls = oldState.mock.calls.length;
+      const newCalls = newState.mock.calls.length;
+      if (settlement === "resolve") resolve();
+      else reject(new Error("Old media request failed"));
+      old.stop();
+      PlaybackAudio.instances[0].dispatchEvent(new Event("ended"));
+      await flush();
+      expect(oldState).toHaveBeenCalledTimes(oldCalls);
+      expect(newState).toHaveBeenCalledTimes(newCalls);
+      expect(PlaybackAudio.instances[1].pause).not.toHaveBeenCalled();
+      expect(PlaybackAudio.instances[1].src).toBe(`${baseURL}speech/question.mp3`);
+    },
+  );
+
+  it("ignores a previous sentence's rejected play promise after the playlist advances", async () => {
+    let reject!: (error: Error) => void;
+    PlaybackAudio.attempts.push(
+      () => new Promise<void>((_resolve, fail) => {
+        reject = fail;
+      }),
+    );
+    const onState = vi.fn();
+    own(playJapaneseAudio({ clips, baseURL, onState }));
+    const audio = PlaybackAudio.instances[0];
+    audio.dispatchEvent(new Event("ended"));
+    await flush();
+    reject(new Error("Previous sentence failed late"));
+    await flush();
+    expect(onState).toHaveBeenLastCalledWith({ source: "ai", status: "playing" });
+    expect(
+      onState.mock.calls.some(([state]) => state.status === "error"),
+    ).toBe(false);
+    expect(audio.pause).not.toHaveBeenCalled();
+    expect(audio.src).toBe(`${baseURL}speech/question.mp3`);
+  });
+
+  it.each(["reject", "throw", "media-error"])(
+    "reports %s clearly without automatically switching to device voice",
+    async (failure) => {
+      if (failure !== "media-error")
+        PlaybackAudio.attempts.push(() => {
+          if (failure === "throw") throw new Error("Cannot play audio");
+          return Promise.reject(
+            new DOMException("Playback denied", "NotAllowedError"),
+          );
+        });
+      const onState = vi.fn();
+      own(playJapaneseAudio({ clips, baseURL, onState }));
+      const audio = PlaybackAudio.instances[0];
+      if (failure === "media-error") audio.dispatchEvent(new Event("error"));
+      await flush();
+      expect(onState).toHaveBeenLastCalledWith(
+        expect.objectContaining({
+          source: "ai",
+          status: "error",
+          message: expect.stringMatching(/device voice/i),
+        }),
+      );
+      audio.dispatchEvent(new Event("ended"));
+      expect(audio.play).toHaveBeenCalledOnce();
+      expect(audio.pause).toHaveBeenCalledOnce();
+      expect(audio.src).toBe("");
+      expect(synthesis.speak).not.toHaveBeenCalled();
+      expect(PlaybackAudio.instances).toHaveLength(1);
+    },
+  );
+
+  it("reports unavailable audio playback without starting browser speech", () => {
+    vi.stubGlobal("Audio", undefined);
+    const onState = vi.fn();
+    own(playJapaneseAudio({ clips, baseURL, onState }));
+    expect(onState).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        source: "ai",
+        status: "error",
+        message: expect.any(String),
+      }),
+    );
+    expect(synthesis.speak).not.toHaveBeenCalled();
+  });
+
+  it("plays prerecordings when the browser has no device speech API", async () => {
+    vi.stubGlobal("window", new EventTarget());
+    vi.stubGlobal("SpeechSynthesisUtterance", undefined);
+    const onState = vi.fn();
+    own(playJapaneseAudio({ clips, baseURL, onState }));
+    await flush();
+    expect(onState).toHaveBeenLastCalledWith({ source: "ai", status: "playing" });
+    expect(PlaybackAudio.instances[0].playedFiles).toEqual([
+      `${baseURL}speech/hello.mp3`,
+    ]);
+    expect(synthesis.speak).not.toHaveBeenCalled();
+  });
+
+  it.each([undefined, "remote"])(
+    "plays device sentences in order using Japanese voice preference %s",
+    (voiceURI) => {
+      const onState = vi.fn();
+      own(
+        playDeviceSpeech({
+          text: "「[[製品|せいひん]]ですか？！」\n『はい！！』 続きです。",
+          voiceURI,
+          onState,
+        }),
+      );
+      expect(synthesis.speak).toHaveBeenCalledOnce();
+      const first = synthesis.speak.mock.calls[0][0];
+      expect(first.text).toBe("「製品ですか？！」");
+      expect(first.voice).toBe(voiceURI ? remote : local);
+      expect(first.lang).toBe("ja-JP");
+      expect(onState).toHaveBeenLastCalledWith({
+        source: "device",
+        status: "playing",
+        remote: Boolean(voiceURI),
+      });
+      endUtterance(first);
+      expect(synthesis.speak).toHaveBeenCalledTimes(2);
+      endUtterance(synthesis.speak.mock.calls[1][0]);
+      expect(
+        synthesis.speak.mock.calls.map(([utterance]) => utterance.text),
+      ).toEqual(["「製品ですか？！」", "『はい！！』", "続きです。"]);
+      endUtterance(synthesis.speak.mock.calls[2][0]);
+      expect(onState).toHaveBeenLastCalledWith({ source: "device", status: "ended" });
+      expect(PlaybackAudio.instances).toHaveLength(0);
+    },
+  );
+
+  it.each([
+    { voices: [] },
+    { voices: [voice("en-US", "english", true)] },
+  ])(
+    "reports missing Japanese device voices without substituting other languages: %j",
+    ({ voices }) => {
+      synthesis.getVoices.mockReturnValue(voices);
+      const onState = vi.fn();
+      own(playDeviceSpeech({ text: "こんにちは。", onState }));
+      expect(onState).toHaveBeenLastCalledWith(
+        expect.objectContaining({
+          source: "device",
+          status: "error",
+          message: expect.stringMatching(/Japanese.*voice/i),
+        }),
+      );
+      expect(synthesis.speak).not.toHaveBeenCalled();
+      expect(PlaybackAudio.instances).toHaveLength(0);
+    },
+  );
+
+  it.each(["network", "canceled", "interrupted"] as const)(
+    "finishes device playback on %s without queueing another sentence",
+    (failure) => {
+      const onState = vi.fn();
+      own(playDeviceSpeech({ text: "一つ目です。二つ目です。", onState }));
+      const utterance = synthesis.speak.mock.calls[0][0];
+      const lateEnd = utterance.onend!;
+      utterance.onerror?.(speechError(failure));
+      expect(onState).toHaveBeenLastCalledWith(
+        expect.objectContaining({
+          source: "device",
+          status: failure === "network" ? "error" : "stopped",
+        }),
+      );
+      if (failure === "network")
+        expect(onState.mock.lastCall?.[0].message).toMatch(/failed/i);
+      lateEnd(new Event("end") as SpeechSynthesisEvent);
+      expect(synthesis.speak).toHaveBeenCalledOnce();
+      expect(utterance.onend).toBeNull();
+      expect(utterance.onerror).toBeNull();
+      expect(PlaybackAudio.instances).toHaveLength(0);
+    },
+  );
+
+  it("stops device speech on navigation and ignores its old sentence callback", () => {
+    const onState = vi.fn();
+    own(playDeviceSpeech({ text: "一つ目です。二つ目です。", onState }));
+    const lateEnd = synthesis.speak.mock.calls[0][0].onend!;
+    windowMock.dispatchEvent(new Event("hashchange"));
+    expect(onState).toHaveBeenLastCalledWith({ source: "device", status: "stopped" });
+    lateEnd(new Event("end") as SpeechSynthesisEvent);
+    expect(synthesis.speak).toHaveBeenCalledOnce();
+    expect(synthesis.cancel).toHaveBeenCalledOnce();
+  });
+
+  it("shares ownership between AI and device speech while stale cleanup leaves the new player alone", async () => {
+    const firstState = vi.fn();
+    const first = own(
+      playDeviceSpeech({ text: "一つ目です。二つ目です。", onState: firstState }),
+    );
+    const lateEnd = synthesis.speak.mock.calls[0][0].onend!;
+    const audioState = vi.fn();
+    const audioController = own(
+      playJapaneseAudio({ clips, baseURL, onState: audioState }),
+    );
+    await flush();
+    expect(firstState).toHaveBeenLastCalledWith({ source: "device", status: "stopped" });
+    first.stop();
+    lateEnd(new Event("end") as SpeechSynthesisEvent);
+    expect(synthesis.cancel).toHaveBeenCalledOnce();
+    expect(synthesis.speak).toHaveBeenCalledOnce();
+    expect(PlaybackAudio.instances[0].pause).not.toHaveBeenCalled();
+    const newState = vi.fn();
+    own(playDeviceSpeech({ text: "新しい文です。", onState: newState }));
+    expect(audioState).toHaveBeenLastCalledWith({ source: "ai", status: "stopped" });
+    audioController.stop();
+    PlaybackAudio.instances[0].dispatchEvent(new Event("ended"));
+    expect(synthesis.cancel).toHaveBeenCalledOnce();
+    expect(synthesis.speak).toHaveBeenCalledTimes(2);
+    expect(newState).toHaveBeenLastCalledWith({
+      source: "device", status: "playing", remote: false,
+    });
   });
 });

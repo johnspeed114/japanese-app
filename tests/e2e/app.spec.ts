@@ -20,6 +20,234 @@ import {
   createSession,
   dateInZone,
 } from "../../src/engine";
+import { plainJapanese } from "../../src/japanese";
+import type { SpeechClip, SpeechManifest } from "../../src/speech-audio";
+
+type SpeechSimulation = {
+  audio: (EventTarget & { src: string })[];
+  played: string[];
+  paused: string[];
+  loads: number;
+  spoken: string[];
+};
+
+// Queue/failure checks simulate events; the Chromium smoke below uses real MP3s.
+async function simulatedSpeech(
+  context: BrowserContext,
+  audioMode: "playing" | "rejected" | "unsupported" = "playing",
+) {
+  await context.addInitScript(
+    ({ audioMode }) => {
+      const simulation: SpeechSimulation = {
+        audio: [],
+        played: [],
+        paused: [],
+        loads: 0,
+        spoken: [],
+      };
+      Object.defineProperty(window, "__speechSimulation", {
+        value: simulation,
+      });
+      class SimulatedAudio extends EventTarget {
+        src = "";
+        preload = "";
+        constructor() {
+          super();
+          simulation.audio.push(this);
+        }
+        play() {
+          simulation.played.push(this.src);
+          return audioMode === "rejected"
+            ? Promise.reject(
+                new DOMException(
+                  "Simulated decoder failure",
+                  "NotSupportedError",
+                ),
+              )
+            : Promise.resolve();
+        }
+        pause() {
+          simulation.paused.push(this.src);
+        }
+        removeAttribute(name: string) {
+          if (name === "src") this.src = "";
+        }
+        load() {
+          simulation.loads++;
+        }
+      }
+      Object.defineProperty(window, "Audio", {
+        configurable: true,
+        value: audioMode === "unsupported" ? undefined : SimulatedAudio,
+      });
+      const synthesis = new EventTarget();
+      Object.assign(synthesis, {
+        getVoices: () => [
+          {
+            default: true,
+            lang: "ja-JP",
+            localService: true,
+            name: "Simulated Japanese voice",
+            voiceURI: "simulation-ja",
+          },
+        ],
+        speak: (utterance: { text: string }) =>
+          simulation.spoken.push(utterance.text),
+        cancel: () => {},
+      });
+      Object.defineProperty(window, "speechSynthesis", {
+        configurable: true,
+        value: synthesis,
+      });
+      class SimulatedUtterance {
+        voice?: SpeechSynthesisVoice;
+        lang = "";
+        rate = 1;
+        onend: (() => void) | null = null;
+        onerror: (() => void) | null = null;
+        constructor(public text: string) {}
+      }
+      Object.defineProperty(window, "SpeechSynthesisUtterance", {
+        configurable: true,
+        value: SimulatedUtterance,
+      });
+    },
+    { audioMode },
+  );
+}
+
+async function speechState(page: Page) {
+  return page.evaluate(() => {
+    const simulation = Reflect.get(
+      window,
+      "__speechSimulation",
+    ) as SpeechSimulation;
+    return {
+      played: simulation.played,
+      paused: simulation.paused,
+      loads: simulation.loads,
+      spoken: simulation.spoken,
+      sources: simulation.audio.map((audio) => audio.src),
+    };
+  });
+}
+
+async function speechEvent(page: Page, index: number, event = "ended") {
+  await page.evaluate(
+    ({ index, event }) => {
+      const simulation = Reflect.get(
+        window,
+        "__speechSimulation",
+      ) as SpeechSimulation;
+      simulation.audio[index].dispatchEvent(new Event(event));
+    },
+    { index, event },
+  );
+}
+
+async function speechClips(text: string): Promise<readonly SpeechClip[]> {
+  const manifest = JSON.parse(
+    await readFile(
+      new URL("../../src/content/speech-manifest.json", import.meta.url),
+      "utf8",
+    ),
+  ) as SpeechManifest;
+  expect(manifest.voice).toBe("marin");
+  const clips =
+    manifest.entries[plainJapanese(text).replace(/\s+/gu, " ").trim()];
+  expect(
+    clips,
+    "the authored fixture must have bundled recorded speech",
+  ).toBeDefined();
+  return clips;
+}
+
+async function recordedCardFixture(page: Page) {
+  const catalog = JSON.parse(
+    await readFile(
+      new URL("../../src/content/catalog.json", import.meta.url),
+      "utf8",
+    ),
+  ) as Catalog;
+  const item = catalog.cards[0];
+  const clips = await speechClips(item.answer);
+  await page.goto("./");
+  await page.getByRole("link", { name: "Practice", exact: true }).click();
+  await page
+    .locator(".library-card")
+    .filter({
+      has: page.getByRole("heading", { name: item.prompt, exact: true }),
+    })
+    .getByRole("button", { name: "Practice this card", exact: true })
+    .click();
+  await page.getByRole("button", { name: "I don’t know", exact: true }).click();
+  await expect(
+    page.getByText("AI-generated Japanese voice", { exact: true }),
+  ).toBeVisible();
+  return { item, clips };
+}
+
+async function shadowingFixture(page: Page) {
+  const { session, catalog } = await sessionFixture(
+    page,
+    "daily",
+    2,
+    (_data, _catalog, session) => {
+      session.readingMode = "shadowing";
+    },
+  );
+  const passage = catalog.passages.find(
+    (value) => value.id === session.passageId,
+  )!;
+  const clips = await speechClips(passage.speechText ?? passage.body);
+  await page
+    .getByRole("button", { name: "Start shadowing", exact: true })
+    .click();
+  await expect(
+    page.getByText("AI-generated Japanese voice", { exact: true }),
+  ).toBeVisible();
+  return { passage, clips };
+}
+
+async function observeRealSpeech(context: BrowserContext) {
+  await context.addInitScript(() => {
+    const nativeAudio = window.Audio;
+    const observation = { audio: [] as HTMLAudioElement[], plays: 0 };
+    Object.defineProperty(window, "__realSpeech", { value: observation });
+    Object.defineProperty(window, "Audio", {
+      configurable: true,
+      value: function Audio(src?: string) {
+        const element = new nativeAudio(src);
+        observation.audio.push(element);
+        const play = element.play.bind(element);
+        element.play = () => {
+          observation.plays++;
+          return play();
+        };
+        return element;
+      },
+    });
+  });
+}
+
+async function realSpeechState(page: Page) {
+  return page.evaluate(() => {
+    const observation = Reflect.get(window, "__realSpeech") as {
+      audio: HTMLAudioElement[];
+      plays: number;
+    };
+    return {
+      plays: observation.plays,
+      audio: observation.audio.map((element) => ({
+        duration: element.duration,
+        time: element.currentTime,
+        paused: element.paused,
+        crossOrigin: element.crossOrigin,
+        error: element.error?.code ?? null,
+      })),
+    };
+  });
+}
 
 async function progress(page: Page): Promise<ProgressData> {
   return page.evaluate(
@@ -1311,4 +1539,309 @@ test("a manually added card can be practiced without changing its FSRS schedule"
       ?.practiceGrades?.[cardId],
   ).toBe(1);
   expect(Object.keys(saved.mistakes)).toEqual([cardId]);
+});
+
+test("recorded speech starts on a tap, advances in order, and Stop prevents late sentence events", async ({
+  page,
+  context,
+}) => {
+  await simulatedSpeech(context);
+  const { clips } = await shadowingFixture(page);
+  expect(clips.length).toBeGreaterThan(2);
+  expect((await speechState(page)).played).toEqual([]);
+  await page
+    .getByRole("button", { name: "Listen sentence by sentence", exact: true })
+    .click();
+  expect((await speechState(page)).played).toEqual([
+    `/japanese-app/${clips[0].file}`,
+  ]);
+  await speechEvent(page, 0);
+  expect((await speechState(page)).played).toEqual(
+    clips.slice(0, 2).map((clip) => `/japanese-app/${clip.file}`),
+  );
+  await page
+    .getByRole("button", { name: "Stop listening", exact: true })
+    .click();
+  await speechEvent(page, 0);
+  const stopped = await speechState(page);
+  expect(stopped.played).toHaveLength(2);
+  expect(stopped.paused).toEqual([`/japanese-app/${clips[1].file}`]);
+  expect(stopped.sources).toEqual([""]);
+  expect(stopped.loads).toBe(1);
+  await expect(
+    page.getByRole("button", {
+      name: "Listen sentence by sentence",
+      exact: true,
+    }),
+  ).toBeVisible();
+});
+
+test("starting a model voice stops the partner voice and navigation stops the current voice", async ({
+  page,
+  context,
+}) => {
+  await simulatedSpeech(context);
+  await sessionFixture(page, "daily", 1);
+  const partner = page.locator(".partner-line .speech-controls");
+  await partner.getByRole("button", { name: "Listen", exact: true }).click();
+  await page
+    .getByRole("button", { name: "I don’t know how to say it", exact: true })
+    .click();
+  const model = page.locator(".answer-block .speech-controls");
+  await model.getByRole("button", { name: "Listen", exact: true }).click();
+  const replaced = await speechState(page);
+  expect(replaced.played).toHaveLength(2);
+  expect(replaced.paused).toEqual([replaced.played[0]]);
+  expect(replaced.sources[0]).toBe("");
+  await expect(
+    partner.getByRole("button", { name: "Listen", exact: true }),
+  ).toBeVisible();
+  await expect(
+    model.getByRole("button", { name: "Stop listening", exact: true }),
+  ).toBeVisible();
+  await speechEvent(page, 0);
+  expect((await speechState(page)).played).toHaveLength(2);
+  await page.getByRole("link", { name: "Settings", exact: true }).click();
+  await expect(
+    page.getByRole("heading", { name: "Settings & backups", exact: true }),
+  ).toBeVisible();
+  await speechEvent(page, 1);
+  const navigated = await speechState(page);
+  expect(navigated.played).toHaveLength(2);
+  expect(navigated.paused).toEqual(replaced.played);
+  expect(navigated.sources).toEqual(["", ""]);
+});
+
+for (const failure of ["rejected", "unsupported", "decoder-error"] as const) {
+  test(`recorded speech ${failure} offers an explicit device-voice fallback without speaking automatically`, async ({
+    page,
+    context,
+  }) => {
+    await simulatedSpeech(
+      context,
+      failure === "decoder-error" ? "playing" : failure,
+    );
+    const { item } = await recordedCardFixture(page);
+    await page.getByRole("button", { name: "Listen", exact: true }).click();
+    if (failure === "decoder-error") await speechEvent(page, 0, "error");
+    await expect(page.getByRole("alert")).toContainText(
+      "AI-generated Japanese voice could not play",
+    );
+    const fallback = page.getByRole("button", {
+      name: "Use device voice",
+      exact: true,
+    });
+    await expect(fallback).toBeVisible();
+    expect((await speechState(page)).spoken).toEqual([]);
+    await fallback.click();
+    await expect(page.getByText("Device voice", { exact: true })).toBeVisible();
+    expect((await speechState(page)).spoken[0]).toBe(
+      plainJapanese(item.answer),
+    );
+    await expect(
+      page.getByRole("button", { name: "Stop listening", exact: true }),
+    ).toBeVisible();
+  });
+}
+
+test("manual and edited models without a bundled clip clearly use device voice", async ({
+  page,
+  context,
+}) => {
+  await simulatedSpeech(context);
+  await page.goto("./");
+  await page.getByRole("link", { name: "Mistakes", exact: true }).click();
+  await page
+    .getByRole("button", { name: "Add a card manually", exact: true })
+    .click();
+  await page
+    .getByRole("textbox", { name: "English production prompt", exact: true })
+    .fill("Describe the imaginary coding cat.");
+  const answers = [
+    "きょうは、あおいねこがコードをかきます。",
+    "あしたは、みどりのねこがテストをします。",
+  ];
+  await page
+    .getByRole("textbox", { name: "Japanese model answer", exact: true })
+    .fill(answers[0]);
+  await page.getByRole("button", { name: "Save card", exact: true }).click();
+  for (const [index, answer] of answers.entries()) {
+    if (index > 0) {
+      await page.getByRole("link", { name: "Mistakes", exact: true }).click();
+      await page.getByRole("button", { name: "Edit", exact: true }).click();
+      await page
+        .getByRole("textbox", { name: "Japanese model answer", exact: true })
+        .fill(answer);
+      await page
+        .getByRole("button", { name: "Save card", exact: true })
+        .click();
+    }
+    await page
+      .getByRole("button", { name: "Practice this card", exact: true })
+      .click();
+    await page
+      .getByRole("button", { name: "I don’t know", exact: true })
+      .click();
+    await expect(page.getByText("Device voice", { exact: true })).toBeVisible();
+    await expect(
+      page.getByText("No saved AI-generated clip for this text.", {
+        exact: true,
+      }),
+    ).toBeVisible();
+    await expect(
+      page.getByText("AI-generated Japanese voice", { exact: true }),
+    ).toHaveCount(0);
+    await page.getByRole("button", { name: "Listen", exact: true }).click();
+    expect((await speechState(page)).spoken).toEqual(
+      answers.slice(0, index + 1),
+    );
+    expect((await speechState(page)).played).toEqual([]);
+    await page
+      .getByRole("button", { name: "Stop listening", exact: true })
+      .click();
+  }
+});
+
+test("Chromium decodes a real bundled MP3 and plays the cached voice while offline", async ({
+  page,
+  context,
+  browserName,
+}) => {
+  test.skip(
+    browserName !== "chromium",
+    "Real MP3 decoding smoke is checked in Chromium; other engines run the control regressions.",
+  );
+  await observeRealSpeech(context);
+  const { clips } = await recordedCardFixture(page);
+  await page.evaluate(async () => {
+    await navigator.serviceWorker.ready;
+  });
+  await page.reload();
+  await expect
+    .poll(() =>
+      page.evaluate(() => Boolean(navigator.serviceWorker.controller)),
+    )
+    .toBe(true);
+  expect((await realSpeechState(page)).plays).toBe(0);
+  const path = `/japanese-app/${clips[0].file}`;
+  const responsePromise = page.waitForResponse(
+    (response) => new URL(response.url()).pathname === path,
+  );
+  await page.getByRole("button", { name: "Listen", exact: true }).click();
+  const response = await responsePromise;
+  expect(response.ok()).toBe(true);
+  expect(response.headers()["content-type"]).toMatch(/^audio\//);
+  await expect
+    .poll(async () => (await realSpeechState(page)).audio[0]?.duration ?? 0)
+    .toBeGreaterThan(0);
+  await expect
+    .poll(async () => (await realSpeechState(page)).audio[0]?.time ?? 0)
+    .toBeGreaterThan(0);
+  expect((await realSpeechState(page)).audio[0].error).toBeNull();
+  expect((await realSpeechState(page)).audio[0].crossOrigin).toBe("anonymous");
+  await page
+    .getByRole("button", { name: "Stop listening", exact: true })
+    .click();
+  expect((await realSpeechState(page)).audio[0].paused).toBe(true);
+  await expect
+    .poll(() =>
+      page.evaluate(async (path) => {
+        for (const name of await caches.keys()) {
+          const cache = await caches.open(name);
+          const key = (await cache.keys()).find(
+            (request) => new URL(request.url).pathname === path,
+          );
+          if (key) {
+            const cached = await cache.match(key);
+            if (cached) return (await cached.arrayBuffer()).byteLength;
+          }
+        }
+        return 0;
+      }, path),
+    )
+    .toBeGreaterThan(0);
+  await context.setOffline(true);
+  await page.reload();
+  await expect(
+    page.getByText("AI-generated Japanese voice", { exact: true }),
+  ).toBeVisible();
+  expect((await realSpeechState(page)).plays).toBe(0);
+  const offlineResponsePromise = page.waitForResponse(
+    (response) => new URL(response.url()).pathname === path,
+  );
+  await page.getByRole("button", { name: "Listen", exact: true }).click();
+  const offlineResponse = await offlineResponsePromise;
+  expect(offlineResponse.ok()).toBe(true);
+  expect(offlineResponse.fromServiceWorker()).toBe(true);
+  await expect
+    .poll(async () => (await realSpeechState(page)).audio[0]?.time ?? 0)
+    .toBeGreaterThan(0);
+  expect((await realSpeechState(page)).audio[0].error).toBeNull();
+  await page
+    .getByRole("button", { name: "Stop listening", exact: true })
+    .click();
+  const saved = await progress(page);
+  expect(
+    saved.sessions.every(
+      (session) => Object.keys(session.recordingIds).length === 0,
+    ),
+  ).toBe(true);
+});
+
+test("cached MP3 byte ranges stay exact offline and reject malformed ranges", async ({
+  page,
+  context,
+}) => {
+  const { clips } = await recordedCardFixture(page);
+  const bytes = await readFile(
+    new URL(`../../public/${clips[0].file}`, import.meta.url),
+  );
+  const path = `/japanese-app/${clips[0].file}`;
+  await page.evaluate(async () => {
+    await navigator.serviceWorker.ready;
+  });
+  await page.reload();
+  await expect
+    .poll(() =>
+      page.evaluate(() => Boolean(navigator.serviceWorker.controller)),
+    )
+    .toBe(true);
+  await context.setOffline(true);
+  const partialResponse = page.waitForResponse(
+    (response) =>
+      new URL(response.url()).pathname === path &&
+      response.request().headers()["range"] === "bytes=0-1",
+  );
+  const partial = await page.evaluate(async (path) => {
+    const response = await fetch(path, { headers: { Range: "bytes=0-1" } });
+    return {
+      status: response.status,
+      contentRange: response.headers.get("content-range"),
+      contentLength: response.headers.get("content-length"),
+      bytes: Array.from(new Uint8Array(await response.arrayBuffer())),
+    };
+  }, path);
+  expect((await partialResponse).fromServiceWorker()).toBe(true);
+  expect(partial.status).toBe(206);
+  expect(partial.contentRange).toBe(`bytes 0-1/${bytes.byteLength}`);
+  expect(partial.contentLength).toBe("2");
+  expect(partial.bytes).toEqual(Array.from(bytes.subarray(0, 2)));
+  const invalidRange = "bytes=invalid";
+  const invalidResponse = page.waitForResponse(
+    (response) =>
+      new URL(response.url()).pathname === path &&
+      response.request().headers()["range"] === invalidRange,
+  );
+  const invalid = await page.evaluate(
+    async ({ path, invalidRange }) => {
+      const response = await fetch(path, { headers: { Range: invalidRange } });
+      return {
+        status: response.status,
+        bytes: (await response.arrayBuffer()).byteLength,
+      };
+    },
+    { path, invalidRange },
+  );
+  expect((await invalidResponse).fromServiceWorker()).toBe(true);
+  expect(invalid).toEqual({ status: 416, bytes: 0 });
 });
