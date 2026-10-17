@@ -62,6 +62,8 @@ Maintainers can verify speech assets without a key using `npm run speech:check`.
 
 All app changes belong on `milestone-1` and go through a pull request for Claude’s final review. The user authorized exactly one empty baseline commit on `main` and its push to establish the repository; that exception does not authorize app changes on `main`. Merging, publishing, releasing, tagging, and deleting the work branch remain held for Claude’s review unless the user explicitly names the step to release it.
 
-The intended free static host is GitHub Pages at `https://johnspeed114.github.io/japanese-app/`. Vite’s base URL, manifest scope, and service worker use `/japanese-app/`. This repository contains a verification workflow and **no deployment job**. The intended hosting address is not a claim that the app is published.
+The free static host is GitHub Pages at `https://johnspeed114.github.io/japanese-app/`. Vite’s base URL, manifest scope, and service worker use `/japanese-app/`. The user authorized publishing `main` there on 2026-10-17. `.github/workflows/pages.yml` publishes a `main` commit only after the **Verify app** workflow passes on that commit; **Run workflow** on the Actions tab republishes the latest `main` by hand. Pull requests and other branches never publish.
+
+One-time setup: in the repository’s **Settings → Pages**, set **Source** to **GitHub Actions**. Until then, the publish job fails at its Pages setup step. After setting it, run **Publish to GitHub Pages** once from the Actions tab, or push to `main`.
 
 The Claude SessionStart hook runs dependency installation only when `CLAUDE_CODE_REMOTE=true`; local Claude sessions skip it. See [implementation details and device acceptance checks](docs/IMPLEMENTATION.md).
