@@ -924,8 +924,10 @@ export function ReadingBlock({
               {furigana ? "Hide furigana" : "Show furigana"}
             </button>
             <span>
-              {session.lookedUp.length + session.externalLookups} distinct
-              lookups
+              {session.lookedUp.length + session.externalLookups} distinct{" "}
+              {session.lookedUp.length + session.externalLookups === 1
+                ? "lookup"
+                : "lookups"}
             </span>
           </div>
           {shadow && (

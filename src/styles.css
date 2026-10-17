@@ -261,6 +261,7 @@ select:focus-visible {
   background: none;
   border-color: transparent;
   color: #6b796d;
+  min-width: 44px;
   padding-left: 0;
   padding-right: 12px;
 }
@@ -285,6 +286,12 @@ select:focus-visible {
   border-bottom: 1px solid #a5b39f;
   padding-bottom: 3px;
   display: inline-block;
+  position: relative;
+}
+.text-link::after {
+  content: "";
+  position: absolute;
+  inset: -12px -6px;
 }
 .back-link {
   display: block;
@@ -803,7 +810,7 @@ select:focus-visible {
   display: inline-flex;
   gap: 8px;
   align-items: center;
-  min-height: 36px;
+  min-height: 44px;
   border: 1px solid #ccd5c5;
   border-radius: 18px;
   background: none;
@@ -881,10 +888,17 @@ select:focus-visible {
 .session-breadcrumb {
   display: flex;
   justify-content: space-between;
+  align-items: center;
   color: var(--muted);
   font-size: 0.74rem;
   margin-bottom: 25px;
   gap: 12px;
+}
+.session-breadcrumb a {
+  display: inline-flex;
+  align-items: center;
+  min-height: 44px;
+  font-size: 0.84rem;
 }
 .passage-body {
   font-size: 1.15rem;
@@ -933,8 +947,8 @@ select:focus-visible {
   margin: 15px 0;
 }
 .lookup-counter .chip {
-  min-height: 36px;
-  min-width: 36px;
+  min-height: 44px;
+  min-width: 44px;
   justify-content: center;
 }
 .empty-state {
@@ -977,7 +991,11 @@ select:focus-visible {
 .inline-notice > div {
   flex: 1;
 }
-.error {
+.tz-short {
+  display: none;
+}
+.error,
+.panel .error {
   color: #a64b3c;
   font-size: 0.82rem;
   padding: 10px 0;
@@ -1006,8 +1024,8 @@ select:focus-visible {
   background: none;
   border: 0;
   font-size: 1.4rem;
-  width: 30px;
-  height: 30px;
+  width: 44px;
+  height: 44px;
 }
 .update-banner {
   background: #e1e9d9;
@@ -1104,6 +1122,7 @@ select:focus-visible {
   display: flex;
   justify-content: space-between;
   align-items: center;
+  min-height: 44px;
   cursor: pointer;
   font-size: 0.82rem;
   gap: 15px;
@@ -1194,7 +1213,7 @@ select:focus-visible {
     flex-wrap: wrap;
   }
   .install-guide .button {
-    min-height: 40px;
+    min-height: 44px;
   }
   .priority-bars > div {
     gap: 12px;
@@ -1229,7 +1248,7 @@ select:focus-visible {
     gap: 3px;
     padding: 9px 0 7px;
     border-radius: 0;
-    font-size: 0.62rem;
+    font-size: 0.75rem;
     min-height: 60px;
   }
   .sidebar nav a.active {
@@ -1255,13 +1274,16 @@ select:focus-visible {
   .topbar {
     height: 56px;
     padding: 0 20px;
-    font-size: 0.71rem;
+    font-size: 0.75rem;
   }
-  .topbar .muted {
+  .topbar .tz-full {
     display: none;
   }
+  .topbar .tz-short {
+    display: inline;
+  }
   .status-dot {
-    font-size: 0.67rem;
+    font-size: 0.75rem;
   }
   .main-content {
     padding: 24px 20px 35px;
@@ -1280,8 +1302,8 @@ select:focus-visible {
     font-size: 0.78rem;
   }
   .hero .eyebrow {
-    font-size: 0.52rem;
-    letter-spacing: 0.09em;
+    font-size: 0.72rem;
+    letter-spacing: 0.06em;
   }
   .hero-date {
     margin: 0 0 0 13px;
@@ -1305,7 +1327,7 @@ select:focus-visible {
     margin: 20px 0;
   }
   .mini-jp {
-    font-size: 0.55rem !important;
+    font-size: 0.75rem !important;
     letter-spacing: 0;
   }
   .stat-grid {
@@ -1480,14 +1502,14 @@ select:focus-visible {
     min-width: 180px;
   }
   .checkpoint-row .button {
-    min-height: 40px;
+    min-height: 44px;
   }
   .recorder-controls {
     flex-wrap: wrap;
     gap: 12px;
   }
   .session-breadcrumb {
-    font-size: 0.66rem;
+    font-size: 0.75rem;
   }
   .passage-body {
     font-size: 1.12rem;

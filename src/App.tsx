@@ -12,6 +12,7 @@ import {
   daysBetween,
   diagnosticWeaknesses,
   confirmedPatterns,
+  isCardDue,
   phaseLengths,
   phaseOnDate,
   pinContentForSession,
@@ -28,7 +29,14 @@ import type { BackupSummary } from "./backup";
 import { hasCompleteReadings, plainJapanese } from "./japanese";
 import { settingsSchema } from "./validation";
 import { PHASES } from "./types";
-import type { ProductionItem, RecordingMeta, Session, Settings } from "./types";
+import type {
+  ProductionItem,
+  ProgressData,
+  RecordingMeta,
+  Scenario,
+  Session,
+  Settings,
+} from "./types";
 import {
   bytes,
   formatTime,
@@ -53,6 +61,56 @@ const labelKind = (kind: Session["kind"]) =>
     "checkpoint-b": "Email & reading checkpoint",
     extra: "Extra practice",
   })[kind];
+const timezoneCity = (timeZone: string) =>
+  (timeZone.split("/").at(-1) ?? timeZone).replace(/_/g, " ");
+const TASK_LABELS: Record<string, string> = {
+  "baseline-1": "Speaking baseline 1",
+  "baseline-2": "Speaking baseline 2",
+  "business-intro": "Business introduction",
+  conversation: "Conversation rehearsal",
+  "checkpoint-email": "Checkpoint email",
+  reading: "Reading",
+  "reading-summary": "Reading summary",
+  reflection: "Wrap-up note",
+};
+const shorten = (text: string) =>
+  text.length > 70 ? `${text.slice(0, 67)}…` : text;
+function taskLabel(key: string, data: ProgressData): string {
+  if (TASK_LABELS[key]) return TASK_LABELS[key];
+  const question = /^reading-question-(\d+)$/.exec(key);
+  if (question) return `Reading question ${Number(question[1]) + 1}`;
+  const separator = key.indexOf(":");
+  const kind = separator < 0 ? "card" : key.slice(0, separator);
+  const id = separator < 0 ? key : key.slice(separator + 1);
+  const scenarios = [
+    ...publishedCatalog.scenarios,
+    ...Object.values(data.snapshots).filter(
+      (value): value is Scenario => "turns" in value,
+    ),
+  ];
+  if (kind === "turn") {
+    for (const scenario of scenarios) {
+      const index = scenario.turns.findIndex((turn) => turn.id === id);
+      if (index >= 0) return `${scenario.title} · turn ${index + 1}`;
+    }
+    return "Conversation turn";
+  }
+  if (kind === "email") {
+    const scenario = scenarios.find((value) => value.id === id);
+    return scenario ? `${scenario.title} · email` : "Email";
+  }
+  const item = [...allCards(data), ...publishedCatalog.diagnostic].find(
+    (value) => value.id === id,
+  );
+  if (!item) return "Card no longer in the library";
+  const prefix =
+    item.kind === "diagnostic"
+      ? "Diagnostic"
+      : data.userCards.some((value) => value.id === id)
+        ? "Your card"
+        : "Card";
+  return `${prefix}: ${shorten(item.prompt)}`;
+}
 function Icon({ name }: { name: string }) {
   const paths: Record<string, string> = {
     today: "M3 10 12 3l9 7M5 9v12h14V9M9 21v-7h6v7",
@@ -76,11 +134,38 @@ function Icon({ name }: { name: string }) {
     </svg>
   );
 }
+function requestPersistentStorage() {
+  void navigator.storage
+    ?.persisted?.()
+    .then((persisted) => persisted || navigator.storage.persist())
+    .catch(() => {});
+}
+function mistakeSource(
+  source: ProgressData["mistakes"][string]["source"],
+  item: ProductionItem,
+) {
+  if (source === "review") return "Missed in review";
+  if (source === "output") return "From a speaking or writing task";
+  return item.review.reviewer === "Your diagnostic mistake"
+    ? "From your diagnostic"
+    : "Added by you";
+}
+function reviewHistory(data: ProgressData, cardId: string) {
+  const reviews = data.reviewEvents.filter((e) => e.cardId === cardId);
+  if (!reviews.length) return "Not reviewed yet";
+  const missed = reviews.filter((e) => e.rating === 1).length;
+  return `Missed ${missed} of ${reviews.length} ${
+    reviews.length === 1 ? "review" : "reviews"
+  }`;
+}
 function InstallGuide() {
   const { data, change } = useStudy();
   const [standalone] = useState(
     () => window.matchMedia("(display-mode: standalone)").matches,
   );
+  useEffect(() => {
+    if (standalone) requestPersistentStorage();
+  }, [standalone]);
   if (standalone || data.settings.installAcknowledged) return null;
   return (
     <div className="install-guide">
@@ -107,6 +192,32 @@ function InstallGuide() {
     </div>
   );
 }
+function PlanPreview({ today }: { today: string }) {
+  const { data } = useStudy();
+  const plan = data.settings.plan;
+  const startDate = plan.startDate ?? today;
+  const studyDays = Math.max(0, daysBetween(startDate, plan.targetDate));
+  const pairs = checkpointCount({ ...plan, startDate });
+  return (
+    <div className="notice inline-notice plan-preview">
+      <div>
+        <strong>Check your plan before the diagnostic.</strong>
+        <p>
+          Starts {startDate} in {plan.timezone}: {studyDays} study days through{" "}
+          {addDays(plan.targetDate, -1)}, with {pairs} weekly checkpoint{" "}
+          {pairs === 1 ? "pair" : "pairs"}
+          {pairs > 0
+            ? ` (the first on ${addDays(startDate, 6)} and ${addDays(startDate, 7)})`
+            : ""}
+          . Study dates follow this timezone even when you travel.
+        </p>
+      </div>
+      <button className="button secondary" onClick={() => go("settings")}>
+        Change in Settings
+      </button>
+    </div>
+  );
+}
 function Today() {
   const { data, change, busy } = useStudy();
   const today = dateInZone(Date.now(), data.settings.plan.timezone);
@@ -120,15 +231,17 @@ function Today() {
       s.studyDate === today &&
       s.completedAt &&
       s.kind !== "extra" &&
+      s.kind !== "diagnostic" &&
       !s.manualCheckpoint,
   );
   const lengths = phaseLengths(plan);
   const phase = phaseOnDate(plan, today);
   const cards = allCards(data);
-  const due = cards.filter(
-    (c) => data.cardStates[c.id]?.due <= Date.now(),
+  const due = cards.filter((c) =>
+    isCardDue(data.cardStates[c.id], today, plan.timezone),
   ).length;
   const start = async () => {
+    requestPersistentStorage();
     const value = await change((d) => {
       if (!d.diagnosticComplete && incomplete?.kind === "diagnostic") return;
       createSession(d, today, Date.now(), publishedCatalog);
@@ -149,6 +262,9 @@ function Today() {
   return (
     <>
       <InstallGuide />
+      {!data.diagnosticComplete && incomplete?.kind !== "diagnostic" && (
+        <PlanPreview today={today} />
+      )}
       <section className="hero">
         <div>
           <span className="eyebrow">YOUR JAPANESE, REACTIVATED</span>
@@ -172,7 +288,7 @@ function Today() {
             {!data.diagnosticComplete
               ? incomplete?.kind === "diagnostic"
                 ? "Resume diagnostic"
-                : "Start diagnostic"
+                : "Start diagnostic with this plan"
               : completedToday
                 ? "View today’s saved session"
                 : incomplete?.studyDate === today
@@ -771,18 +887,12 @@ function Mistakes() {
             <article className="panel library-card" key={item.id}>
               <div className="card-top">
                 <RegisterBadge register={item.register} />
-                <span className="muted">{mistake.source}</span>
+                <span className="muted">
+                  {mistakeSource(mistake.source, item)}
+                </span>
               </div>
               <h3>{item.prompt}</h3>
-              <p className="muted">
-                Missed{" "}
-                {
-                  data.reviewEvents.filter(
-                    (e) => e.cardId === item.id && e.rating === 1,
-                  ).length
-                }{" "}
-                review attempts
-              </p>
+              <p className="muted">{reviewHistory(data, item.id)}</p>
               <div className="actions">
                 <button
                   className="button secondary"
@@ -1151,12 +1261,12 @@ function Progress() {
                 )}
                 {Object.entries(s.ratings).map(([key, value]) => (
                   <p className="muted" key={key}>
-                    {key}: {value.replace(/-/g, " ")}
+                    {taskLabel(key, data)}: {value.replace(/-/g, " ")}
                   </p>
                 ))}
                 {Object.entries(s.practiceGrades ?? {}).map(([id, grade]) => (
                   <p className="muted" key={`practice-${id}`}>
-                    {id}: extra practice ·{" "}
+                    {taskLabel(id, data)}: extra practice ·{" "}
                     {["", "Again", "Hard", "Good", "Easy"][grade]}
                   </p>
                 ))}
@@ -1164,7 +1274,7 @@ function Progress() {
                   .filter(([, value]) => value.trim())
                   .map(([key, value]) => (
                     <div className="saved-answer" key={key}>
-                      <span className="eyebrow">{key}</span>
+                      <span className="eyebrow">{taskLabel(key, data)}</span>
                       <p>
                         <Japanese text={value} />
                       </p>
@@ -1421,6 +1531,22 @@ function BackupControls({
     </section>
   );
 }
+function timezoneChangeNote(saved: string, next: string) {
+  let nextToday: string;
+  try {
+    nextToday = dateInZone(Date.now(), next);
+  } catch {
+    return "Enter an IANA timezone such as Asia/Tokyo or America/Los_Angeles.";
+  }
+  const savedToday = dateInZone(Date.now(), saved);
+  const shift =
+    nextToday > savedToday
+      ? ` Today will jump ahead to ${nextToday}, so a streak with no session on ${savedToday} restarts.`
+      : nextToday < savedToday
+        ? ` Today will move back to ${nextToday}; anything already saved for ${savedToday} keeps that date.`
+        : "";
+  return `After you save, today's date and due cards follow ${next} instead of ${saved}.${shift}`;
+}
 function SettingsScreen() {
   const { data, change, notify, busy } = useStudy();
   const [settings, setSettings] = useState<Settings>(
@@ -1600,6 +1726,14 @@ function SettingsScreen() {
           The timezone stays fixed during travel unless you change it. Existing
           session and observation dates remain saved.
         </p>
+        {settings.plan.timezone !== data.settings.plan.timezone && (
+          <p className="notice">
+            {timezoneChangeNote(
+              data.settings.plan.timezone,
+              settings.plan.timezone,
+            )}
+          </p>
+        )}
         <div className="phase-settings">
           {PHASES.map((phase, index) => (
             <label className="field" key={phase}>
@@ -1784,7 +1918,12 @@ function Shell() {
         <header className="topbar">
           <span>
             {dateInZone(Date.now(), data.settings.plan.timezone)}{" "}
-            <span className="muted">· {data.settings.plan.timezone}</span>
+            <span className="muted tz-full">
+              · {data.settings.plan.timezone}
+            </span>
+            <span className="muted tz-short">
+              · {timezoneCity(data.settings.plan.timezone)}
+            </span>
           </span>
           <span className="status-dot">
             {offline ? "Offline · saved practice" : "Saved on this device"}

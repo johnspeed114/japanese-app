@@ -533,7 +533,7 @@ async function completeReading(
   await lookup.click();
   await lookup.click();
   await expect(
-    page.getByText("1 distinct lookups", { exact: true }),
+    page.getByText("1 distinct lookup", { exact: true }),
   ).toBeVisible();
   for (const question of questions)
     await page.getByLabel(question.prompt).fill("記事の内容を説明します。");

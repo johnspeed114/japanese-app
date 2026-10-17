@@ -146,6 +146,54 @@ export function daysBetween(start: string, target: string): number {
   return ordinal(target) - ordinal(start);
 }
 
+// ts-fsrs counts elapsed days by UTC calendar date, so the scheduler sees each
+// review at noon UTC on its study date in the saved timezone.
+function studyClock(date: string): number {
+  return ordinal(date) * DAY + DAY / 2;
+}
+
+function zoneOffset(at: number, timeZone: string): number {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone,
+    hourCycle: "h23",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+  }).formatToParts(at);
+  const part = (name: string) =>
+    Number(parts.find((value) => value.type === name)!.value);
+  return (
+    Date.UTC(
+      part("year"),
+      part("month") - 1,
+      part("day"),
+      part("hour"),
+      part("minute"),
+      part("second"),
+    ) -
+    Math.floor(at / 1000) * 1000
+  );
+}
+
+export function noonInZone(date: string, timeZone: string): number {
+  const utcNoon = studyClock(date);
+  const guess = utcNoon - zoneOffset(utcNoon, timeZone);
+  return utcNoon - zoneOffset(guess, timeZone);
+}
+
+export function isCardDue(
+  card: SerializedCard | undefined,
+  today: string,
+  timeZone: string,
+): boolean {
+  return Boolean(
+    card && card.state !== State.New && dateInZone(card.due, timeZone) <= today,
+  );
+}
+
 export function phaseLengths(
   plan: PlanConfig,
 ): [number, number, number, number] {
@@ -486,11 +534,10 @@ export function selectNextCard(
         !graded.has(item.id) &&
         (!userIds.has(item.id) || !data.mistakes[item.id]?.archived),
     );
+  const timeZone = data.settings.plan.timezone;
+  const today = dateInZone(now, timeZone);
   const due = items
-    .filter((item) => {
-      const card = data.cardStates[item.id];
-      return card && card.state !== State.New && card.due <= now;
-    })
+    .filter((item) => isCardDue(data.cardStates[item.id], today, timeZone))
     .sort(
       (a, b) =>
         data.cardStates[a.id].due - data.cardStates[b.id].due ||
@@ -499,9 +546,7 @@ export function selectNextCard(
   if (due.length) return due[0];
   if (budget - elapsedSeconds < 60 || session.kind !== "daily") return null;
   const todayIntroduced = data.reviewEvents.filter(
-    (event) =>
-      event.introduced &&
-      event.observationDate === dateInZone(now, data.settings.plan.timezone),
+    (event) => event.introduced && event.observationDate === today,
   ).length;
   if (todayIntroduced >= 4) return null;
   const weaknesses = diagnosticWeaknesses(data, catalog);
@@ -556,14 +601,29 @@ export function applyGrade(
   item = frozen;
   const before = data.cardStates[item.id];
   const introduced = !before || before.state === State.New;
+  const timeZone = data.settings.plan.timezone;
+  const atDate = dateInZone(now, timeZone);
+  const clock = studyClock(atDate);
   const { card, log } = scheduler.next(
-    before ?? createEmptyCard(now),
-    now,
+    before
+      ? {
+          ...before,
+          due: studyClock(dateInZone(before.due, timeZone)),
+          last_review:
+            before.last_review === undefined
+              ? undefined
+              : studyClock(dateInZone(before.last_review, timeZone)),
+        }
+      : createEmptyCard(clock),
+    clock,
     rating,
   );
-  const atDate = dateInZone(now, data.settings.plan.timezone);
+  const due = noonInZone(
+    new Date(card.due).toISOString().slice(0, 10),
+    timeZone,
+  );
   const eventId = crypto.randomUUID();
-  data.cardStates[item.id] = serializeCard(card);
+  data.cardStates[item.id] = { ...serializeCard(card), due, last_review: now };
   data.reviewEvents.push({
     id: eventId,
     cardId: item.id,
@@ -573,7 +633,7 @@ export function applyGrade(
     rating,
     introduced,
     contentRevision: item.revision,
-    log: { ...log, due: log.due.getTime(), review: log.review.getTime() },
+    log: { ...log, due: before?.due ?? now, review: now },
   });
   if (session.currentCardId === item.id) delete session.currentCardId;
   if (rating === 1) {

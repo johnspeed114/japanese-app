@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { State } from "ts-fsrs";
+import { State, type Grade } from "ts-fsrs";
 import {
   addDays,
   applyGrade,
@@ -12,6 +12,8 @@ import {
   daysBetween,
   diagnosticWeaknesses,
   hasPriorPassageExposure,
+  isCardDue,
+  noonInZone,
   phaseLengths,
   phaseOnDate,
   pinContentForSession,
@@ -615,6 +617,109 @@ describe("historical content revisions", () => {
   });
 });
 
+describe("local study dates for reviews", () => {
+  const at = (iso: string) => Date.parse(iso);
+  function graded(timeZone: string, gradedAt: number, rating: Grade = 3) {
+    const data = progress();
+    data.settings.plan.timezone = timeZone;
+    const content = catalog();
+    const date = dateInZone(gradedAt, timeZone);
+    const session = createSession(data, date, gradedAt, content, "daily");
+    applyGrade(data, content.cards[0], rating, session.id, gradedAt);
+    return { data, content };
+  }
+  function nextAt(data: ProgressData, content: Catalog, now: number) {
+    const date = dateInZone(now, data.settings.plan.timezone);
+    const session = createSession(data, date, now, content, "daily");
+    return selectNextCard(data, session, content, now, 0)?.id;
+  }
+
+  it("shows a card for its whole local due date, even before the hour it was graded", () => {
+    const zone = "America/Los_Angeles";
+    // 7:30 pm PDT on Oct 17 is already Oct 18 in UTC.
+    const { data, content } = graded(zone, at("2026-10-18T02:30:00Z"));
+    expect(dateInZone(data.cardStates.one.due, zone)).toBe("2026-10-19");
+    expect(isCardDue(data.cardStates.one, "2026-10-18", zone)).toBe(false);
+    expect(isCardDue(data.cardStates.one, "2026-10-19", zone)).toBe(true);
+    // 9 pm PDT on Oct 18: not due yet.
+    expect(nextAt(data, content, at("2026-10-19T04:00:00Z"))).not.toBe("one");
+    // 6:30 pm PDT on Oct 19, an hour earlier in the day than the first grade.
+    expect(nextAt(data, content, at("2026-10-20T01:30:00Z"))).toBe("one");
+  });
+
+  it("counts elapsed days by local date when a review crosses midnight UTC", () => {
+    const zone = "America/Los_Angeles";
+    const first = at("2026-10-17T23:30:00Z"); // 4:30 pm PDT
+    const [before, after] = [
+      "2026-10-19T23:30:00Z", // 4:30 pm PDT
+      "2026-10-20T00:30:00Z", // 5:30 pm PDT, the next UTC date
+    ].map((second) => {
+      const { data, content } = graded(zone, first);
+      const now = at(second);
+      const session = createSession(
+        data,
+        dateInZone(now, zone),
+        now,
+        content,
+        "daily",
+      );
+      applyGrade(data, content.cards[0], 3, session.id, now);
+      return data.cardStates.one;
+    });
+    expect(after.stability).toBe(before.stability);
+    expect(after.scheduled_days).toBe(before.scheduled_days);
+    expect(dateInZone(after.due, zone)).toBe(dateInZone(before.due, zone));
+  });
+
+  it("keeps due dates on calendar days across the US daylight-saving change", () => {
+    const zone = "America/Los_Angeles";
+    // 12:30 am PDT on Oct 31. Nov 1 is 25 hours long, but two days later is Nov 2.
+    const { data } = graded(zone, at("2026-10-31T07:30:00Z"));
+    expect(data.cardStates.one.scheduled_days).toBe(2);
+    expect(dateInZone(data.cardStates.one.due, zone)).toBe("2026-11-02");
+    expect(data.cardStates.one.last_review).toBe(at("2026-10-31T07:30:00Z"));
+  });
+
+  it("puts due dates on the right day in timezones ahead of UTC", () => {
+    for (const zone of ["Asia/Tokyo", "Pacific/Auckland"]) {
+      const eightAm = noonInZone("2026-11-20", zone) - 4 * 3_600_000;
+      const { data } = graded(zone, eightAm);
+      expect(dateInZone(data.cardStates.one.due, zone)).toBe("2026-11-22");
+      expect(isCardDue(data.cardStates.one, "2026-11-21", zone)).toBe(false);
+      expect(isCardDue(data.cardStates.one, "2026-11-22", zone)).toBe(true);
+    }
+  });
+
+  it("finds local noon on daylight-saving days and far from UTC", () => {
+    expect(noonInZone("2026-11-01", "America/Los_Angeles")).toBe(
+      at("2026-11-01T20:00:00Z"),
+    );
+    expect(noonInZone("2026-10-25", "Europe/London")).toBe(
+      at("2026-10-25T12:00:00Z"),
+    );
+    expect(noonInZone("2026-11-20", "Asia/Tokyo")).toBe(
+      at("2026-11-20T03:00:00Z"),
+    );
+    expect(noonInZone("2026-11-20", "Pacific/Auckland")).toBe(
+      at("2026-11-19T23:00:00Z"),
+    );
+  });
+
+  it("never treats a new card as due", () => {
+    const { data } = graded("America/Los_Angeles", NOW);
+    expect(
+      isCardDue(
+        { ...data.cardStates.one, state: State.New },
+        "2026-12-01",
+        "America/Los_Angeles",
+      ),
+    ).toBe(false);
+    expect(isCardDue(undefined, "2026-12-01", "America/Los_Angeles")).toBe(
+      false,
+    );
+  });
+});
+
 describe("production SRS", () => {
   it("keeps Again due tomorrow and exposes no minute-scale learning step", () => {
     const data = progress();
@@ -649,7 +754,7 @@ describe("production SRS", () => {
     expect(session.studyDate).toBe("2026-10-11");
   });
 
-  it("serves overdue cards before new cards and uses actual due timestamps", () => {
+  it("serves cards due on the local date before new cards", () => {
     const data = progress();
     const content = catalog();
     const yesterday = createSession(
@@ -662,9 +767,9 @@ describe("production SRS", () => {
     applyGrade(data, content.cards[1], 1, yesterday.id, NOW - 86_400_000);
     const today = createSession(data, "2026-10-11", NOW, content);
     expect(selectNextCard(data, today, content, NOW, 0)?.id).toBe("two");
-    expect(selectNextCard(data, today, content, NOW - 1, 0)?.id).not.toBe(
-      "two",
-    );
+    expect(
+      selectNextCard(data, today, content, NOW - 13 * 3_600_000, 0)?.id,
+    ).not.toBe("two");
     expect(selectNextCard(data, today, content, NOW, 470)?.id).toBe("two");
     expect(selectNextCard(data, today, content, NOW, 480)).toBeNull();
   });
