@@ -72,6 +72,7 @@ const TASK_LABELS: Record<string, string> = {
   reading: "Reading",
   "reading-summary": "Reading summary",
   reflection: "Wrap-up note",
+  "speaking-checkpoint-notes": "Checkpoint notes",
 };
 const shorten = (text: string) =>
   text.length > 70 ? `${text.slice(0, 67)}…` : text;
@@ -102,7 +103,10 @@ function taskLabel(key: string, data: ProgressData): string {
   const item = [...allCards(data), ...publishedCatalog.diagnostic].find(
     (value) => value.id === id,
   );
-  if (!item) return "Card no longer in the library";
+  if (!item)
+    return kind === "card" && separator >= 0
+      ? "Card no longer in the library"
+      : "Saved answer";
   const prefix =
     item.kind === "diagnostic"
       ? "Diagnostic"
@@ -288,7 +292,7 @@ function Today() {
             {!data.diagnosticComplete
               ? incomplete?.kind === "diagnostic"
                 ? "Resume diagnostic"
-                : "Start diagnostic with this plan"
+                : "Start diagnostic"
               : completedToday
                 ? "View today’s saved session"
                 : incomplete?.studyDate === today
@@ -718,7 +722,10 @@ function Mistakes() {
         issueTags: editing?.issueTags ?? [],
         review: {
           status: "draft",
-          reviewer: "You · manually added",
+          reviewer:
+            editing?.review.reviewer === "Your diagnostic mistake"
+              ? editing.review.reviewer
+              : "You · manually added",
           date: dateInZone(Date.now(), d.settings.plan.timezone),
         },
       };
@@ -1290,7 +1297,10 @@ function Progress() {
                         1000,
                     )}{" "}
                     reading time · {s.lookedUp.length + s.externalLookups}{" "}
-                    reading lookups ·{" "}
+                    {s.lookedUp.length + s.externalLookups === 1
+                      ? "reading lookup"
+                      : "reading lookups"}{" "}
+                    ·{" "}
                     {s.assisted
                       ? "with reading support"
                       : "without furigana support"}{" "}
@@ -1531,13 +1541,16 @@ function BackupControls({
     </section>
   );
 }
-function timezoneChangeNote(saved: string, next: string) {
-  let nextToday: string;
+function isValidTimezone(timeZone: string) {
   try {
-    nextToday = dateInZone(Date.now(), next);
+    dateInZone(Date.now(), timeZone);
+    return true;
   } catch {
-    return "Enter an IANA timezone such as Asia/Tokyo or America/Los_Angeles.";
+    return false;
   }
+}
+function timezoneChangeNote(saved: string, next: string) {
+  const nextToday = dateInZone(Date.now(), next);
   const savedToday = dateInZone(Date.now(), saved);
   const shift =
     nextToday > savedToday
@@ -1598,7 +1611,12 @@ function SettingsScreen() {
     const conflictMessage =
       "Saved settings changed elsewhere. Review the refreshed form before saving.";
     try {
-      const checked = settingsSchema.parse(settings);
+      const parsed = settingsSchema.safeParse(settings);
+      if (!parsed.success) {
+        setError(parsed.error.issues.map((issue) => issue.message).join(" "));
+        return;
+      }
+      const checked = parsed.data;
       setError("");
       savedVersion.current = JSON.stringify({ ...checked, lastExportAt: null });
       await change((d) => {
@@ -1628,6 +1646,7 @@ function SettingsScreen() {
       setError(e instanceof Error ? e.message : "Check your settings.");
     }
   };
+  const zoneValid = isValidTimezone(settings.plan.timezone);
   const setPlan = (
     key: keyof Settings["plan"],
     value: string | number | number[] | null,
@@ -1726,13 +1745,19 @@ function SettingsScreen() {
           The timezone stays fixed during travel unless you change it. Existing
           session and observation dates remain saved.
         </p>
-        {settings.plan.timezone !== data.settings.plan.timezone && (
-          <p className="notice">
-            {timezoneChangeNote(
-              data.settings.plan.timezone,
-              settings.plan.timezone,
-            )}
+        {!zoneValid ? (
+          <p className="error" role="alert">
+            Enter an IANA timezone such as Asia/Tokyo or America/Los_Angeles.
           </p>
+        ) : (
+          settings.plan.timezone !== data.settings.plan.timezone && (
+            <p className="notice">
+              {timezoneChangeNote(
+                data.settings.plan.timezone,
+                settings.plan.timezone,
+              )}
+            </p>
+          )
         )}
         <div className="phase-settings">
           {PHASES.map((phase, index) => (
@@ -1763,7 +1788,7 @@ function SettingsScreen() {
         )}
         <button
           className="button"
-          disabled={busy}
+          disabled={busy || !zoneValid}
           onClick={() => {
             void save();
           }}

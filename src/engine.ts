@@ -124,9 +124,23 @@ function ordinal(date: string): number {
   return at / DAY;
 }
 
+const dateFormats = new Map<string, Intl.DateTimeFormat>();
+const timeFormats = new Map<string, Intl.DateTimeFormat>();
+function cachedFormat(
+  cache: Map<string, Intl.DateTimeFormat>,
+  timeZone: string,
+  options: Intl.DateTimeFormatOptions,
+): Intl.DateTimeFormat {
+  let format = cache.get(timeZone);
+  if (!format) {
+    format = new Intl.DateTimeFormat("en-US", { timeZone, ...options });
+    cache.set(timeZone, format);
+  }
+  return format;
+}
+
 export function dateInZone(at: number, timeZone: string): string {
-  const parts = new Intl.DateTimeFormat("en-US", {
-    timeZone,
+  const parts = cachedFormat(dateFormats, timeZone, {
     year: "numeric",
     month: "2-digit",
     day: "2-digit",
@@ -153,8 +167,7 @@ function studyClock(date: string): number {
 }
 
 function zoneOffset(at: number, timeZone: string): number {
-  const parts = new Intl.DateTimeFormat("en-US", {
-    timeZone,
+  const parts = cachedFormat(timeFormats, timeZone, {
     hourCycle: "h23",
     year: "numeric",
     month: "2-digit",
@@ -184,14 +197,27 @@ export function noonInZone(date: string, timeZone: string): number {
   return utcNoon - zoneOffset(guess, timeZone);
 }
 
+// Due dates come from the local date of the last review plus the scheduled
+// days, in the timezone saved now, so changing the timezone never makes a
+// card due on the date it was last reviewed.
+export function cardDueDate(card: SerializedCard, timeZone: string): string {
+  return card.last_review === undefined
+    ? dateInZone(card.due, timeZone)
+    : addDays(dateInZone(card.last_review, timeZone), card.scheduled_days);
+}
+
 export function isCardDue(
   card: SerializedCard | undefined,
   today: string,
   timeZone: string,
 ): boolean {
-  return Boolean(
-    card && card.state !== State.New && dateInZone(card.due, timeZone) <= today,
-  );
+  if (!card || card.state === State.New) return false;
+  if (
+    card.last_review !== undefined &&
+    dateInZone(card.last_review, timeZone) >= today
+  )
+    return false;
+  return cardDueDate(card, timeZone) <= today;
 }
 
 export function phaseLengths(
@@ -492,7 +518,18 @@ export function selectNextCard(
       .filter((event) => event.sessionId === session.id)
       .map((event) => event.cardId),
   );
-  if (session.currentCardId && !graded.has(session.currentCardId)) {
+  const gradedElsewhere = (id: string) =>
+    data.reviewEvents.some(
+      (event) =>
+        event.cardId === id &&
+        event.sessionId !== session.id &&
+        event.at >= session.createdAt,
+    );
+  if (
+    session.currentCardId &&
+    !graded.has(session.currentCardId) &&
+    !gradedElsewhere(session.currentCardId)
+  ) {
     const current = [
       ...catalog.cards,
       ...catalog.keigoDrills,
@@ -608,7 +645,7 @@ export function applyGrade(
     before
       ? {
           ...before,
-          due: studyClock(dateInZone(before.due, timeZone)),
+          due: studyClock(cardDueDate(before, timeZone)),
           last_review:
             before.last_review === undefined
               ? undefined

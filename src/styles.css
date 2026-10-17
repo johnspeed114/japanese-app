@@ -478,7 +478,7 @@ select:focus-visible {
   white-space: nowrap;
 }
 .agenda-index {
-  font-size: 0.65rem;
+  font-size: 0.75rem;
   border: 1px solid var(--line);
   width: 30px;
   height: 30px;
@@ -1026,6 +1026,7 @@ select:focus-visible {
   font-size: 1.4rem;
   width: 44px;
   height: 44px;
+  flex: none;
 }
 .update-banner {
   background: #e1e9d9;
@@ -1126,7 +1127,6 @@ select:focus-visible {
   cursor: pointer;
   font-size: 0.82rem;
   gap: 15px;
-  min-height: 35px;
 }
 .history-row > div {
   padding: 20px 0;
@@ -1302,7 +1302,7 @@ select:focus-visible {
     font-size: 0.78rem;
   }
   .hero .eyebrow {
-    font-size: 0.72rem;
+    font-size: 0.75rem;
     letter-spacing: 0.06em;
   }
   .hero-date {
@@ -1313,7 +1313,7 @@ select:focus-visible {
     font-size: 4rem;
   }
   .hero-date > span:not(.eyebrow) {
-    font-size: 0.7rem;
+    font-size: 0.75rem;
     text-align: right;
   }
   .hero .button {
@@ -1337,13 +1337,13 @@ select:focus-visible {
     padding: 15px 7px;
     flex-direction: column;
     gap: 7px;
-    font-size: 0.66rem;
+    font-size: 0.75rem;
   }
   .stat-number {
     font-size: 1.7rem;
   }
   .stat-number small {
-    font-size: 0.6rem;
+    font-size: 0.75rem;
   }
   .panel {
     padding: 22px;
@@ -1360,10 +1360,10 @@ select:focus-visible {
     font-size: 1.35rem;
   }
   .section-title .badge {
-    font-size: 0.63rem;
+    font-size: 0.75rem;
   }
   .eyebrow {
-    font-size: 0.6rem;
+    font-size: 0.75rem;
   }
   .page-heading h1 {
     font-size: 2rem;
@@ -1411,7 +1411,7 @@ select:focus-visible {
     min-height: 66px;
   }
   .grade-button small {
-    font-size: 0.7rem;
+    font-size: 0.75rem;
   }
   .field textarea {
     font-size: 1.1rem;
@@ -1420,7 +1420,7 @@ select:focus-visible {
     gap: 8px;
   }
   .card-top .time-pill {
-    font-size: 0.66rem;
+    font-size: 0.75rem;
   }
   .button {
     font-size: 0.78rem;
@@ -1436,10 +1436,10 @@ select:focus-visible {
     gap: 12px;
   }
   .agenda-row p {
-    font-size: 0.72rem;
+    font-size: 0.75rem;
   }
   .agenda-row > span:last-child {
-    font-size: 0.64rem;
+    font-size: 0.75rem;
   }
   .agenda-index {
     width: 26px;
@@ -1488,11 +1488,11 @@ select:focus-visible {
   }
   .priority-bars > div {
     grid-template-columns: 85px 1fr 75px;
-    font-size: 0.68rem;
+    font-size: 0.75rem;
     gap: 9px;
   }
   .priority-bars small {
-    font-size: 0.61rem;
+    font-size: 0.75rem;
   }
   .checkpoint-row {
     flex-wrap: wrap;
@@ -1518,7 +1518,7 @@ select:focus-visible {
     gap: 16px;
   }
   .tabs button {
-    font-size: 0.73rem;
+    font-size: 0.75rem;
   }
   .wrap-card h1 {
     font-size: 2.3rem;

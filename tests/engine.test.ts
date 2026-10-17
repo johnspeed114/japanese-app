@@ -11,6 +11,7 @@ import {
   dateInZone,
   daysBetween,
   diagnosticWeaknesses,
+  cardDueDate,
   hasPriorPassageExposure,
   isCardDue,
   noonInZone,
@@ -682,12 +683,45 @@ describe("local study dates for reviews", () => {
 
   it("puts due dates on the right day in timezones ahead of UTC", () => {
     for (const zone of ["Asia/Tokyo", "Pacific/Auckland"]) {
-      const eightAm = noonInZone("2026-11-20", zone) - 4 * 3_600_000;
-      const { data } = graded(zone, eightAm);
+      const eightPm = noonInZone("2026-11-20", zone) + 8 * 3_600_000;
+      const { data, content } = graded(zone, eightPm);
       expect(dateInZone(data.cardStates.one.due, zone)).toBe("2026-11-22");
       expect(isCardDue(data.cardStates.one, "2026-11-21", zone)).toBe(false);
       expect(isCardDue(data.cardStates.one, "2026-11-22", zone)).toBe(true);
+      // 9 am on the due date, earlier in the day than the 8 pm grade.
+      const nineAm = noonInZone("2026-11-22", zone) - 3 * 3_600_000;
+      expect(nextAt(data, content, nineAm)).toBe("one");
     }
+  });
+
+  it("never makes a card due on the date it was reviewed after a timezone change", () => {
+    // Again at 8 pm in Tokyo on Dec 10, then a same-day flight to Los Angeles.
+    const { data } = graded("Asia/Tokyo", at("2026-12-10T11:00:00Z"), 1);
+    data.settings.plan.timezone = "America/Los_Angeles";
+    const card = data.cardStates.one;
+    expect(dateInZone(at("2026-12-11T03:00:00Z"), "America/Los_Angeles")).toBe(
+      "2026-12-10",
+    );
+    expect(isCardDue(card, "2026-12-10", "America/Los_Angeles")).toBe(false);
+    expect(cardDueDate(card, "America/Los_Angeles")).toBe("2026-12-11");
+    expect(isCardDue(card, "2026-12-11", "America/Los_Angeles")).toBe(true);
+  });
+
+  it("does not resume a shown card that another session has graded since", () => {
+    const zone = "America/Los_Angeles";
+    // Good at 8 pm PDT on Oct 14, so the card is due Oct 16.
+    const { data, content } = graded(zone, at("2026-10-15T03:00:00Z"));
+    const oct16 = at("2026-10-17T03:00:00Z");
+    const left = createSession(data, "2026-10-16", oct16, content, "daily");
+    expect(selectNextCard(data, left, content, oct16, 0)?.id).toBe("one");
+    left.currentCardId = "one";
+    const oct17 = at("2026-10-18T03:00:00Z");
+    const today = createSession(data, "2026-10-17", oct17, content, "daily");
+    expect(selectNextCard(data, today, content, oct17, 0)?.id).toBe("one");
+    applyGrade(data, content.cards[0], 3, today.id, oct17);
+    expect(
+      selectNextCard(data, left, content, oct17 + 1_800_000, 0)?.id,
+    ).not.toBe("one");
   });
 
   it("finds local noon on daylight-saving days and far from UTC", () => {
